@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-13_v.1.2
+// @version      2026-09-13_v.1.3
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -581,6 +581,36 @@
         handleGameError('console.error', args.map(a => (a && a.stack) ? a.stack : String(a)).join(' '))
         return originalError.apply(console, args);
     };
+
+    // ---------- memory watchdog ----------
+    // the tab dies with an OOM after a few hours of farming: the game's heap only grows, and once it
+    // approaches the browser limit the game crashes - at which point it can't even download its own
+    // symbols file to report what happened ("Failed to download file ....symbols.json.gz" in the log).
+    // Reloading slightly earlier is free: the macro resumes itself after a reload (see LAST_MACRO_KEY).
+    // Tune with localStorage.MEMORY_RELOAD_RATIO; 0 (or anything outside 0..1) disables the watchdog.
+    const MEMORY_CHECK_INTERVAL = 60000
+    const MEMORY_WARN_MARGIN = 0.15
+    const MEMORY_RELOAD_RATIO = Number(localStorage.getItem('MEMORY_RELOAD_RATIO') || 0.85)
+
+    if (performance.memory && MEMORY_RELOAD_RATIO > 0 && MEMORY_RELOAD_RATIO <= 1) {
+        let memoryWarned = false
+        setInterval(() => {
+            const used = performance.memory.usedJSHeapSize
+            const limit = performance.memory.jsHeapSizeLimit
+            if (!limit) return
+
+            const ratio = used / limit
+            const asText = Math.round(used / 1048576) + '/' + Math.round(limit / 1048576) + ' МБ (' + Math.round(ratio * 100) + '%)'
+
+            if (ratio >= MEMORY_RELOAD_RATIO) {
+                addError('память ' + asText + ' - профилактическая перезагрузка')
+                reloadPage('профилактика OOM, память ' + asText, 'oom')
+            } else if (ratio >= MEMORY_RELOAD_RATIO - MEMORY_WARN_MARGIN && !memoryWarned) {
+                memoryWarned = true
+                addError('память ' + asText)
+            }
+        }, MEMORY_CHECK_INTERVAL)
+    }
 
     // ===== WAITING UNTIL GAME INITIALIZED =====
     const check = setInterval(async () => {
