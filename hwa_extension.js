@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Dungeon runner
+// @name         Подземелье титанов
 // @namespace    http://tampermonkey.net/
 // @version      2026-09-13_v.1.0
 // @description  try to take over the world!
