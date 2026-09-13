@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-13_v.1.3
+// @version      2026-09-13_v.1.4
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -32,6 +32,7 @@
     const MACRO_SESSION_START_KEY = 'macroSessionStart'
     const MACRO_RELOAD_COUNT_KEY = 'macroReloadCount'
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
+    const MACRO_RELOAD_HISTORY_KEY = 'macroReloadHistory'
     // reload reason categories, in the order they should be displayed
     const RELOAD_REASON_LABELS = {
         oom: 'OOM',
@@ -506,6 +507,14 @@
         reasonCounts[category] = (reasonCounts[category] || 0) + 1
         localStorage.setItem(MACRO_RELOAD_REASONS_KEY, JSON.stringify(reasonCounts))
 
+        // the on-screen log only keeps 20 lines and the macro refills it within seconds of a reload,
+        // so the reason of a reload is lost there almost immediately - keep the last 20 reasons here
+        try {
+            const history = JSON.parse(localStorage.getItem(MACRO_RELOAD_HISTORY_KEY)) || []
+            history.push(new Date().toLocaleString('ru-RU', { hour12: false }) + ' [' + category + '] ' + reason)
+            localStorage.setItem(MACRO_RELOAD_HISTORY_KEY, JSON.stringify(history.slice(-20)))
+        } catch {}
+
         await sendTelegramNotify(`🔄 Страница перезагружается (${reason})\nВремя: ${formatNowForTelegram()}`)
         location.reload()
     }
@@ -850,6 +859,7 @@
                 localStorage.setItem(MACRO_SESSION_START_KEY, String(Date.now()))
                 localStorage.setItem(MACRO_RELOAD_COUNT_KEY, '0')
                 localStorage.setItem(MACRO_RELOAD_REASONS_KEY, '{}')
+                localStorage.setItem(MACRO_RELOAD_HISTORY_KEY, '[]')
             }
             if (macroTimerInterval == null) {
                 macroTimerInterval = setInterval(updateMacroStatusDisplay, 1000)
