@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-13_v.1.4
+// @version      2026-09-13_v.1.5
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -32,7 +32,49 @@
     const MACRO_SESSION_START_KEY = 'macroSessionStart'
     const MACRO_RELOAD_COUNT_KEY = 'macroReloadCount'
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
-    const MACRO_RELOAD_HISTORY_KEY = 'macroReloadHistory'
+
+    // keep in sync with the @version header above; GM_info is used when the manager exposes it
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-13_v.1.5'
+
+    // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
+    // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
+    // back, so anything interesting is pushed out of it long before anyone can read it.
+    const DIAG_LOG_KEY = 'diagLog'
+    const DIAG_LOG_MAX = 200
+    let DIAG_LOG_ENABLED = loadBoolSetting('DIAG_LOG', true)
+
+    function diagLogTime() {
+        return new Date().toLocaleString('ru-RU', { hour12: false })
+    }
+
+    function diagLog(kind, text) {
+        if (!DIAG_LOG_ENABLED) return
+        try {
+            const entries = JSON.parse(localStorage.getItem(DIAG_LOG_KEY)) || []
+            const line = String(text).slice(0, 300)
+            const last = entries[entries.length - 1]
+            // a message repeating back to back collapses into one entry with a counter
+            if (last && last.kind === kind && last.text === line) {
+                last.count = (last.count || 1) + 1
+                last.time = diagLogTime()
+            } else {
+                entries.push({ time: diagLogTime(), kind, text: line })
+            }
+            localStorage.setItem(DIAG_LOG_KEY, JSON.stringify(entries.slice(-DIAG_LOG_MAX)))
+        } catch {}
+    }
+
+    function formatDiagLog() {
+        try {
+            const entries = JSON.parse(localStorage.getItem(DIAG_LOG_KEY)) || []
+            return entries
+                .map(e => e.time + '  [' + e.kind + '] ' + e.text + (e.count > 1 ? '  (x' + e.count + ')' : ''))
+                .join('\n')
+        } catch {
+            return ''
+        }
+    }
+
     // reload reason categories, in the order they should be displayed
     const RELOAD_REASON_LABELS = {
         oom: 'OOM',
@@ -507,13 +549,7 @@
         reasonCounts[category] = (reasonCounts[category] || 0) + 1
         localStorage.setItem(MACRO_RELOAD_REASONS_KEY, JSON.stringify(reasonCounts))
 
-        // the on-screen log only keeps 20 lines and the macro refills it within seconds of a reload,
-        // so the reason of a reload is lost there almost immediately - keep the last 20 reasons here
-        try {
-            const history = JSON.parse(localStorage.getItem(MACRO_RELOAD_HISTORY_KEY)) || []
-            history.push(new Date().toLocaleString('ru-RU', { hour12: false }) + ' [' + category + '] ' + reason)
-            localStorage.setItem(MACRO_RELOAD_HISTORY_KEY, JSON.stringify(history.slice(-20)))
-        } catch {}
+        diagLog('RELOAD/' + category, reason)
 
         await sendTelegramNotify(`🔄 Страница перезагружается (${reason})\nВремя: ${formatNowForTelegram()}`)
         location.reload()
@@ -559,8 +595,9 @@
 
     function handleGameError(source, msg) {
         if (!msg) return
-        const category = RELOAD_ON_GAME_CRASH ? classifyCrash(msg) : null
-        if (!category) {
+        const category = classifyCrash(msg)
+        diagLog(category ? source + '/' + category : source, msg)
+        if (!category || !RELOAD_ON_GAME_CRASH) {
             addError(msg)
             return
         }
@@ -859,7 +896,6 @@
                 localStorage.setItem(MACRO_SESSION_START_KEY, String(Date.now()))
                 localStorage.setItem(MACRO_RELOAD_COUNT_KEY, '0')
                 localStorage.setItem(MACRO_RELOAD_REASONS_KEY, '{}')
-                localStorage.setItem(MACRO_RELOAD_HISTORY_KEY, '[]')
             }
             if (macroTimerInterval == null) {
                 macroTimerInterval = setInterval(updateMacroStatusDisplay, 1000)
@@ -2179,6 +2215,16 @@
                     })
                     settingsPanel.appendChild(settingsTitle)
 
+                    const settingsVersion = document.createElement('div')
+                    settingsVersion.textContent = 'version ' + SCRIPT_VERSION
+                    Object.assign(settingsVersion.style, {
+                        color: '#8fa8c4',
+                        fontSize: '11px',
+                        textAlign: 'center',
+                        marginBottom: '10px'
+                    })
+                    settingsPanel.appendChild(settingsVersion)
+
                     function makeSettingCheckbox(labelText, storageKey, getValue, setValue) {
                         const label = document.createElement('label')
                         Object.assign(label.style, {
@@ -2430,12 +2476,131 @@
                     settingsPanel.appendChild(remoteControlHint)
                 }
 
+                // =========== LOG ===========
+                // Errors and reloads only - the game path keeps going to the toolbar log as before.
+                // This is what to send over when something needs to be looked into.
+                function buildLogPanel() {
+                    const logPanel = makeDailyPopupPanel('Log', '🩺')
+
+                    const logTitle = document.createElement('div')
+                    logTitle.textContent = 'Error log'
+                    Object.assign(logTitle.style, {
+                        fontWeight: 'bold',
+                        marginBottom: '8px',
+                        color: '#eef7ff',
+                        textAlign: 'center'
+                    })
+                    logPanel.appendChild(logTitle)
+
+                    const logToggle = document.createElement('label')
+                    Object.assign(logToggle.style, {
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '8px',
+                        padding: '4px 2px',
+                        cursor: 'pointer',
+                        userSelect: 'none'
+                    })
+                    const logCheckbox = document.createElement('input')
+                    logCheckbox.type = 'checkbox'
+                    logCheckbox.checked = DIAG_LOG_ENABLED
+                    logCheckbox.addEventListener('change', () => {
+                        DIAG_LOG_ENABLED = logCheckbox.checked
+                        localStorage.setItem('DIAG_LOG', String(DIAG_LOG_ENABLED))
+                    })
+                    logToggle.appendChild(logCheckbox)
+                    logToggle.appendChild(document.createTextNode('Collect errors and reload reasons'))
+                    logPanel.appendChild(logToggle)
+
+                    const logHint = document.createElement('div')
+                    logHint.textContent = 'Every page error and every reload with its reason. Survives reloads, keeps the last ' + DIAG_LOG_MAX + ' entries.'
+                    Object.assign(logHint.style, {
+                        color: '#8fa8c4',
+                        fontSize: '11px',
+                        margin: '6px 0'
+                    })
+                    logPanel.appendChild(logHint)
+
+                    const logBox = document.createElement('textarea')
+                    logBox.readOnly = true
+                    logBox.rows = 14
+                    logBox.placeholder = 'No errors recorded yet'
+                    Object.assign(logBox.style, inputStyle, {
+                        display: 'block',
+                        width: '100%',
+                        boxSizing: 'border-box',
+                        resize: 'vertical',
+                        fontFamily: 'monospace',
+                        fontSize: '11px',
+                        marginBottom: '8px'
+                    })
+                    logPanel.appendChild(logBox)
+
+                    function renderLog() {
+                        const text = formatDiagLog()
+                        if (logBox.value === text) return
+                        const atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 4
+                        logBox.value = text
+                        if (atBottom) logBox.scrollTop = logBox.scrollHeight
+                    }
+
+                    const logButtonsRow = document.createElement('div')
+                    Object.assign(logButtonsRow.style, {
+                        display: 'flex',
+                        gap: '8px',
+                        justifyContent: 'center'
+                    })
+                    logPanel.appendChild(logButtonsRow)
+
+                    function makeLogButton(text, onClick) {
+                        const button = document.createElement('button')
+                        button.textContent = text
+                        Object.assign(button.style, greenButtonStyle, { width: 'fit-content' })
+                        button.onmouseenter = () => {
+                            button.style.filter = 'brightness(1.12)'
+                        }
+                        button.onmouseleave = () => {
+                            button.style.filter = 'brightness(1)'
+                        }
+                        button.addEventListener('click', (e) => {
+                            e.stopPropagation()
+                            onClick(button)
+                        })
+                        logButtonsRow.appendChild(button)
+                        return button
+                    }
+
+                    makeLogButton('Copy', (button) => {
+                        const text = formatDiagLog()
+                        if (!text) return
+                        // the clipboard API needs the document focused, which it is not while the
+                        // game canvas holds focus - the textarea selection path always works here
+                        logBox.select()
+                        document.execCommand('copy')
+                        const original = button.textContent
+                        button.textContent = 'Copied'
+                        setTimeout(() => { button.textContent = original }, 1200)
+                    })
+
+                    makeLogButton('Clear', () => {
+                        localStorage.setItem(DIAG_LOG_KEY, '[]')
+                        renderLog()
+                    })
+
+                    renderLog()
+                    // cheap refresh: only redraws while the tab is actually open
+                    setInterval(() => {
+                        if (logPanel.style.display !== 'none') renderLog()
+                    }, 2000)
+                }
+
                 buildDungeonPanel()
                 buildFrontierPanel()
                 buildDailyTasksPanel()
                 const { repeatClickButton, stopRecordingClicks } = buildRepeatClickPanel()
                 buildDelaysPanel()
                 buildSettingsPanel()
+                buildLogPanel()
 
                 activateDailyPopupSection(dailyPopupSections[0])
 
