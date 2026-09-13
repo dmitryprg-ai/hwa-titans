@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-13_v.1.7
+// @version      2026-09-13_v.1.8
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-13_v.1.7'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-13_v.1.8'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -2606,6 +2606,15 @@
                     })
                     logPanel.appendChild(logHint)
 
+                    const logMemory = document.createElement('div')
+                    Object.assign(logMemory.style, {
+                        color: '#bcd6f5',
+                        fontSize: '12px',
+                        fontFamily: 'monospace',
+                        margin: '6px 0'
+                    })
+                    logPanel.appendChild(logMemory)
+
                     const logBox = document.createElement('textarea')
                     logBox.readOnly = true
                     logBox.rows = 14
@@ -2622,6 +2631,11 @@
                     logPanel.appendChild(logBox)
 
                     function renderLog() {
+                        const jsHeap = performance.memory
+                            ? '  |  JS-куча ' + Math.round(performance.memory.usedJSHeapSize / 1048576) + ' МБ'
+                            : ''
+                        logMemory.textContent = describeWasmHeap() + jsHeap
+
                         const text = formatDiagLog()
                         if (logBox.value === text) return
                         const atBottom = logBox.scrollTop + logBox.clientHeight >= logBox.scrollHeight - 4
