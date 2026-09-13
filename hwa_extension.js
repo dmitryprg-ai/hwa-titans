@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-13_v.1.6
+// @version      2026-09-13_v.1.7
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-13_v.1.6'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-13_v.1.7'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -549,7 +549,7 @@
         reasonCounts[category] = (reasonCounts[category] || 0) + 1
         localStorage.setItem(MACRO_RELOAD_REASONS_KEY, JSON.stringify(reasonCounts))
 
-        diagLog('RELOAD/' + category, reason)
+        diagLog('RELOAD/' + category, reason + ' | ' + describeWasmHeap())
 
         await sendTelegramNotify(`🔄 Страница перезагружается (${reason})\nВремя: ${formatNowForTelegram()}`)
         location.reload()
@@ -606,7 +606,6 @@
             return
         }
         addError('[' + source + '] ' + category + ': ' + msg)
-        diagLog('memory', 'на момент краша: ' + describeWasmHeap())
         reloadPage('критическая ошибка (' + source + '): ' + msg.slice(0, 120), category)
     }
 
@@ -637,6 +636,10 @@
     // or off the exports of the instantiated module.
     let wasmMemory = null
     let wasmMaxBytes = 0
+    // This build declares no maximum, so nothing tells us where the ceiling is - but measurement
+    // does: the heap climbs to 4080MB and dies there, every time. That is the hard limit of 32-bit
+    // wasm (4GB of address space), not a browser setting, so no machine has more of it.
+    const WASM32_MAX_BYTES = 4096 * 1048576
 
     try {
         const OriginalMemory = WebAssembly.Memory
@@ -678,13 +681,17 @@
         }
     }
 
-    // "wasm 1850/2048 МБ (90%)", or without the limit when the build declared no maximum
+    function wasmCeilingBytes() {
+        return wasmMaxBytes || WASM32_MAX_BYTES
+    }
+
+    // "wasm 3810/4096 МБ (93%), потолок wasm32"
     function describeWasmHeap() {
         const bytes = wasmHeapBytes()
         if (!bytes) return 'wasm: не измерена'
         const usedMb = Math.round(bytes / 1048576)
-        if (!wasmMaxBytes) return 'wasm ' + usedMb + ' МБ'
-        return 'wasm ' + usedMb + '/' + Math.round(wasmMaxBytes / 1048576) + ' МБ (' + Math.round(bytes / wasmMaxBytes * 100) + '%)'
+        const max = wasmCeilingBytes()
+        return 'wasm ' + usedMb + '/' + Math.round(max / 1048576) + ' МБ (' + Math.round(bytes / max * 100) + '%)' + (wasmMaxBytes ? '' : ', потолок wasm32')
     }
 
     // ---------- memory watchdog ----------
@@ -694,7 +701,7 @@
     const MEMORY_CHECK_INTERVAL = 15000
     const MEMORY_WARN_MARGIN = 0.15
     const MEMORY_RELOAD_RATIO = Number(localStorage.getItem('MEMORY_RELOAD_RATIO') || 0.85)
-    const WASM_RELOAD_RATIO = Number(localStorage.getItem('WASM_RELOAD_RATIO') || 0.9)
+    const WASM_RELOAD_RATIO = Number(localStorage.getItem('WASM_RELOAD_RATIO') || 0.93)
 
     if (MEMORY_RELOAD_RATIO > 0 || WASM_RELOAD_RATIO > 0) {
         let jsHeapWarned = false
@@ -704,13 +711,13 @@
             const wasmBytes = wasmHeapBytes()
             if (wasmBytes) {
                 const wasmMb = Math.round(wasmBytes / 1048576)
-                // one line per 100MB of growth - enough to see the rate without flooding the log
-                if (Math.abs(wasmMb - lastLoggedWasmMb) >= 100) {
+                // one line per 200MB of growth - enough to see the rate without flooding the log
+                if (Math.abs(wasmMb - lastLoggedWasmMb) >= 200) {
                     lastLoggedWasmMb = wasmMb
                     diagLog('memory', describeWasmHeap())
                 }
-                if (wasmMaxBytes && WASM_RELOAD_RATIO > 0 && WASM_RELOAD_RATIO <= 1 &&
-                    wasmBytes / wasmMaxBytes >= WASM_RELOAD_RATIO) {
+                if (WASM_RELOAD_RATIO > 0 && WASM_RELOAD_RATIO <= 1 &&
+                    wasmBytes / wasmCeilingBytes() >= WASM_RELOAD_RATIO) {
                     addError('память ' + describeWasmHeap() + ' - профилактическая перезагрузка')
                     reloadPage('профилактика OOM, ' + describeWasmHeap(), 'oom')
                     return
