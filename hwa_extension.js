@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-13_v.1.5
+// @version      2026-09-13_v.1.6
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-13_v.1.5'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-13_v.1.6'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -606,6 +606,7 @@
             return
         }
         addError('[' + source + '] ' + category + ': ' + msg)
+        diagLog('memory', 'на момент краша: ' + describeWasmHeap())
         reloadPage('критическая ошибка (' + source + '): ' + msg.slice(0, 120), category)
     }
 
@@ -628,32 +629,109 @@
         return originalError.apply(console, args);
     };
 
+    // ---------- wasm heap ----------
+    // The game dies of OOM every few minutes of farming and performance.memory shows nothing: that
+    // counter only covers the JS heap, while the game lives in a WebAssembly heap invisible to it
+    // (measured: JS heap flat at ~19% right up to the crash). The instance is not exposed on window
+    // either, so grab the memory object where it cannot hide - as it is created, when it first grows,
+    // or off the exports of the instantiated module.
+    let wasmMemory = null
+    let wasmMaxBytes = 0
+
+    try {
+        const OriginalMemory = WebAssembly.Memory
+        WebAssembly.Memory = new Proxy(OriginalMemory, {
+            construct(target, args) {
+                const memory = new target(...args)
+                wasmMemory = memory
+                // descriptors count 64KB pages
+                if (args[0] && args[0].maximum) wasmMaxBytes = args[0].maximum * 65536
+                return memory
+            }
+        })
+
+        const originalGrow = OriginalMemory.prototype.grow
+        OriginalMemory.prototype.grow = function (pages) {
+            wasmMemory = this
+            return originalGrow.call(this, pages)
+        }
+
+        for (const name of ['instantiate', 'instantiateStreaming']) {
+            const original = WebAssembly[name]
+            if (typeof original !== 'function') continue
+            WebAssembly[name] = function (...args) {
+                return original.apply(WebAssembly, args).then(result => {
+                    const instance = result && result.instance ? result.instance : result
+                    const memory = instance && instance.exports && instance.exports.memory
+                    if (memory && typeof memory.grow === 'function') wasmMemory = memory
+                    return result
+                })
+            }
+        }
+    } catch {}
+
+    function wasmHeapBytes() {
+        try {
+            return wasmMemory ? wasmMemory.buffer.byteLength : 0
+        } catch {
+            return 0
+        }
+    }
+
+    // "wasm 1850/2048 МБ (90%)", or without the limit when the build declared no maximum
+    function describeWasmHeap() {
+        const bytes = wasmHeapBytes()
+        if (!bytes) return 'wasm: не измерена'
+        const usedMb = Math.round(bytes / 1048576)
+        if (!wasmMaxBytes) return 'wasm ' + usedMb + ' МБ'
+        return 'wasm ' + usedMb + '/' + Math.round(wasmMaxBytes / 1048576) + ' МБ (' + Math.round(bytes / wasmMaxBytes * 100) + '%)'
+    }
+
     // ---------- memory watchdog ----------
-    // the tab dies with an OOM after a few hours of farming: the game's heap only grows, and once it
-    // approaches the browser limit the game crashes - at which point it can't even download its own
-    // symbols file to report what happened ("Failed to download file ....symbols.json.gz" in the log).
-    // Reloading slightly earlier is free: the macro resumes itself after a reload (see LAST_MACRO_KEY).
-    // Tune with localStorage.MEMORY_RELOAD_RATIO; 0 (or anything outside 0..1) disables the watchdog.
-    const MEMORY_CHECK_INTERVAL = 60000
+    // Reloading a little early is free - the macro resumes itself after a reload (see LAST_MACRO_KEY) -
+    // while hitting the ceiling costs the battle in progress and leaves a dead "Halting program" tab.
+    // Tune with localStorage.WASM_RELOAD_RATIO / MEMORY_RELOAD_RATIO; 0 disables that half.
+    const MEMORY_CHECK_INTERVAL = 15000
     const MEMORY_WARN_MARGIN = 0.15
     const MEMORY_RELOAD_RATIO = Number(localStorage.getItem('MEMORY_RELOAD_RATIO') || 0.85)
+    const WASM_RELOAD_RATIO = Number(localStorage.getItem('WASM_RELOAD_RATIO') || 0.9)
 
-    if (performance.memory && MEMORY_RELOAD_RATIO > 0 && MEMORY_RELOAD_RATIO <= 1) {
-        let memoryWarned = false
+    if (MEMORY_RELOAD_RATIO > 0 || WASM_RELOAD_RATIO > 0) {
+        let jsHeapWarned = false
+        let lastLoggedWasmMb = 0
+
         setInterval(() => {
-            const used = performance.memory.usedJSHeapSize
-            const limit = performance.memory.jsHeapSizeLimit
-            if (!limit) return
+            const wasmBytes = wasmHeapBytes()
+            if (wasmBytes) {
+                const wasmMb = Math.round(wasmBytes / 1048576)
+                // one line per 100MB of growth - enough to see the rate without flooding the log
+                if (Math.abs(wasmMb - lastLoggedWasmMb) >= 100) {
+                    lastLoggedWasmMb = wasmMb
+                    diagLog('memory', describeWasmHeap())
+                }
+                if (wasmMaxBytes && WASM_RELOAD_RATIO > 0 && WASM_RELOAD_RATIO <= 1 &&
+                    wasmBytes / wasmMaxBytes >= WASM_RELOAD_RATIO) {
+                    addError('память ' + describeWasmHeap() + ' - профилактическая перезагрузка')
+                    reloadPage('профилактика OOM, ' + describeWasmHeap(), 'oom')
+                    return
+                }
+            }
 
-            const ratio = used / limit
-            const asText = Math.round(used / 1048576) + '/' + Math.round(limit / 1048576) + ' МБ (' + Math.round(ratio * 100) + '%)'
+            if (performance.memory && MEMORY_RELOAD_RATIO > 0 && MEMORY_RELOAD_RATIO <= 1) {
+                const used = performance.memory.usedJSHeapSize
+                const limit = performance.memory.jsHeapSizeLimit
+                if (!limit) return
 
-            if (ratio >= MEMORY_RELOAD_RATIO) {
-                addError('память ' + asText + ' - профилактическая перезагрузка')
-                reloadPage('профилактика OOM, память ' + asText, 'oom')
-            } else if (ratio >= MEMORY_RELOAD_RATIO - MEMORY_WARN_MARGIN && !memoryWarned) {
-                memoryWarned = true
-                addError('память ' + asText)
+                const ratio = used / limit
+                const asText = Math.round(used / 1048576) + '/' + Math.round(limit / 1048576) + ' МБ (' + Math.round(ratio * 100) + '%)'
+
+                if (ratio >= MEMORY_RELOAD_RATIO) {
+                    addError('JS-куча ' + asText + ' - профилактическая перезагрузка')
+                    reloadPage('профилактика OOM, JS-куча ' + asText, 'oom')
+                } else if (ratio >= MEMORY_RELOAD_RATIO - MEMORY_WARN_MARGIN && !jsHeapWarned) {
+                    jsHeapWarned = true
+                    addError('JS-куча ' + asText)
+                }
             }
         }, MEMORY_CHECK_INTERVAL)
     }
