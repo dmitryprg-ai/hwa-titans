@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-13_v.1.1
+// @version      2026-09-13_v.1.2
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -25,6 +25,8 @@
 
     let PRESERVE_LOG = loadBoolSetting('PRESERVE_LOG', true)
     let LOG_ACTIONS = loadBoolSetting('LOG_ACTIONS', true)
+    // reload the page when the game itself crashes (wasm OOM / uncaught exception), see handleGameError()
+    let RELOAD_ON_GAME_CRASH = loadBoolSetting('RELOAD_ON_GAME_CRASH', true)
     const PERSISTED_LOGS_KEY = 'persistedLogs'
 
     const MACRO_SESSION_START_KEY = 'macroSessionStart'
@@ -508,27 +510,75 @@
         location.reload()
     }
 
-    window.addEventListener('unhandledrejection', (e) => {
-        const msg = String(e.reason);
-        if (msg.includes('OOM') || msg.includes('memory access out of bounds')) {
-            reloadPage('критическая ошибка (unhandledrejection): ' + msg.slice(0, 120), 'oom');
-        } else if (msg.includes('Internal Server Error')) {
-            reloadPage('критическая ошибка (unhandledrejection): ' + msg.slice(0, 120), 'crash');
-        } else {
+    // ---------- crash classification ----------
+    // the game is a Unity/WebGL build, so a fatal wasm error can surface through three different
+    // channels: an uncaught 'error' event, a rejected promise or a plain console.error.
+    // all three are funnelled through handleGameError() so they are classified the same way.
+    const OOM_PATTERNS = [
+        'OOM',
+        'memory access out of bounds',
+        'out of memory',
+        'Out of Memory',
+        'Cannot enlarge memory',
+        'buffer allocation failed'
+    ]
+    const CRASH_PATTERNS = [
+        'Internal Server Error',
+        'RuntimeError',
+        'Aborted(',
+        'unreachable executed',
+        'null function or function signature mismatch',
+        'table index is out of bounds',
+        // <build>.symbols.json[.gz] is the game's own debug-symbol file: its Unity loader downloads it
+        // ONLY while formatting a stack trace, i.e. only after the game has already thrown.
+        // So "Failed to download file .../xxx.symbols.json.gz" is a reliable crash marker even when
+        // the exception itself never reaches the console (Unity prints it only after the symbols load).
+        'symbols.json'
+    ]
+
+    // returns 'oom' / 'crash' for messages that mean the game is dead, null for everything else
+    function classifyCrash(msg) {
+        if (OOM_PATTERNS.some(p => msg.includes(p))) return 'oom'
+        if (CRASH_PATTERNS.some(p => msg.includes(p))) return 'crash'
+        return null
+    }
+
+    // a crash reported while the game is still booting is not worth a reload - the fresh page would
+    // very likely crash the same way and we'd spin in a reload loop. Those cases are still recovered
+    // (a bit later) by the macro's own wrong-screen retry, see RELOAD_PAGE_ON_FAILURE.
+    const MIN_UPTIME_BEFORE_CRASH_RELOAD = 60000
+
+    function handleGameError(source, msg) {
+        if (!msg) return
+        const category = RELOAD_ON_GAME_CRASH ? classifyCrash(msg) : null
+        if (!category) {
             addError(msg)
+            return
         }
+        if (performance.now() < MIN_UPTIME_BEFORE_CRASH_RELOAD) {
+            addError('[' + source + '] краш при загрузке, без перезагрузки: ' + msg)
+            return
+        }
+        addError('[' + source + '] ' + category + ': ' + msg)
+        reloadPage('критическая ошибка (' + source + '): ' + msg.slice(0, 120), category)
+    }
+
+    // uncaught exceptions: in a Unity build these do NOT reach console.error until the symbols file
+    // is downloaded and the stack is demangled - if that download fails the real message is lost,
+    // so catch it here, where it is still intact
+    window.addEventListener('error', (e) => {
+        // resource load failures (<img>, <script>, ...) also fire this event and carry no message
+        const msg = e.message || (e.error ? String(e.error) : '')
+        handleGameError('window.onerror', msg)
+    })
+
+    window.addEventListener('unhandledrejection', (e) => {
+        handleGameError('unhandledrejection', String(e.reason))
     });
 
     const originalError = console.error;
     console.error = function (...args) {
-        const msg = args.join(' ');
-        if (msg.includes('OOM') || msg.includes('memory access out of bounds')) {
-            reloadPage('критическая ошибка (console.error): ' + msg.slice(0, 120), 'oom');
-        } else if (msg.includes('Internal Server Error')) {
-            reloadPage('критическая ошибка (console.error): ' + msg.slice(0, 120), 'crash');
-        } else {
-            addError(msg)
-        }
+        handleGameError('console.error', args.map(a => (a && a.stack) ? a.stack : String(a)).join(' '))
         return originalError.apply(console, args);
     };
 
@@ -2113,6 +2163,7 @@
 
                     makeSettingCheckbox('Log all actions', 'LOG_ACTIONS', () => LOG_ACTIONS, v => { LOG_ACTIONS = v })
                     makeSettingCheckbox('Preserve log on reload', 'PRESERVE_LOG', () => PRESERVE_LOG, v => { PRESERVE_LOG = v })
+                    makeSettingCheckbox('Reload on game crash', 'RELOAD_ON_GAME_CRASH', () => RELOAD_ON_GAME_CRASH, v => { RELOAD_ON_GAME_CRASH = v })
 
                     // not persisted to localStorage - always starts disabled
                     const debugLabel = document.createElement('label')
