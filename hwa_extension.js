@@ -1,13 +1,16 @@
 // ==UserScript==
 // @name         Dungeon runner
 // @namespace    http://tampermonkey.net/
-// @version      2026-08-31_09:49
+// @version      2026-09-13_v.1.0
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=hero-wars-alliance.com
+// @updateURL    https://raw.githubusercontent.com/dmitryprg-ai/hwa-titans/main/hwa_extension.js
+// @downloadURL  https://raw.githubusercontent.com/dmitryprg-ai/hwa-titans/main/hwa_extension.js
 // @grant        none
 // ==/UserScript==
+
 
 (async function() {
     'use strict';
