@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-18_v.1.9
+// @version      2026-09-18_v.2.0
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-18_v.1.9'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-18_v.2.0'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -47,7 +47,9 @@
         return new Date().toLocaleString('ru-RU', { hour12: false })
     }
 
-    function diagLog(kind, text) {
+    // toolbar: false for callers that already print their own line there, so it is not doubled
+    function diagLog(kind, text, toolbar = true) {
+        if (toolbar) addError('[' + kind + '] ' + text)
         if (!DIAG_LOG_ENABLED) return
         try {
             const entries = JSON.parse(localStorage.getItem(DIAG_LOG_KEY)) || []
@@ -413,7 +415,27 @@
         }
     }
 
-    // keeps the last 10 errors as separate spans inside #errorContainer
+    const MAX_LOG_LINES = 100
+    let persistLogsTimer = null
+
+    // the throttled write below would be lost when the page reloads a moment later, and the lines
+    // written right before a reload are exactly the ones worth keeping
+    function persistLogsNow() {
+        if (persistLogsTimer != null) {
+            clearTimeout(persistLogsTimer)
+            persistLogsTimer = null
+        }
+        if (!PRESERVE_LOG) return
+        const container = document.getElementById('errorContainer')
+        if (!container) return
+        try {
+            localStorage.setItem(PERSISTED_LOGS_KEY, JSON.stringify(Array.from(container.children).map(el => el.textContent)))
+        } catch {}
+    }
+
+    window.addEventListener('pagehide', persistLogsNow)
+
+    // keeps the last MAX_LOG_LINES lines as separate spans inside #errorContainer
     function addError(msg) {
         const container = document.getElementById('errorContainer')
         if (!container) return
@@ -428,7 +450,7 @@
 
         container.appendChild(span)
 
-        while (container.children.length > 20) {
+        while (container.children.length > MAX_LOG_LINES) {
             container.removeChild(container.firstChild)
         }
 
@@ -439,9 +461,10 @@
             setLatestLogText(latestLogEl, shortMsg)
         }
 
-        if (PRESERVE_LOG) {
-            const logs = Array.from(container.children).map(el => el.textContent)
-            localStorage.setItem(PERSISTED_LOGS_KEY, JSON.stringify(logs))
+        // writing the whole panel on every line was fine at 20 lines; at MAX_LOG_LINES, with the
+        // macro logging several lines a second, coalesce it into one write per second
+        if (PRESERVE_LOG && persistLogsTimer == null) {
+            persistLogsTimer = setTimeout(persistLogsNow, 1000)
         }
     }
 
@@ -551,6 +574,7 @@
 
         diagLog('RELOAD/' + category, reason + ' | ' + describeWasmHeap())
 
+        persistLogsNow()
         await sendTelegramNotify(`🔄 Страница перезагружается (${reason})\nВремя: ${formatNowForTelegram()}`)
         location.reload()
     }
@@ -596,7 +620,7 @@
     function handleGameError(source, msg) {
         if (!msg) return
         const category = classifyCrash(msg)
-        diagLog(category ? source + '/' + category : source, msg)
+        diagLog(category ? source + '/' + category : source, msg, false)
         if (!category || !RELOAD_ON_GAME_CRASH) {
             addError(msg)
             return
@@ -718,7 +742,6 @@
                 }
                 if (WASM_RELOAD_RATIO > 0 && WASM_RELOAD_RATIO <= 1 &&
                     wasmBytes / wasmCeilingBytes() >= WASM_RELOAD_RATIO) {
-                    addError('память ' + describeWasmHeap() + ' - профилактическая перезагрузка')
                     reloadPage('профилактика OOM, ' + describeWasmHeap(), 'oom')
                     return
                 }
@@ -733,7 +756,6 @@
                 const asText = Math.round(used / 1048576) + '/' + Math.round(limit / 1048576) + ' МБ (' + Math.round(ratio * 100) + '%)'
 
                 if (ratio >= MEMORY_RELOAD_RATIO) {
-                    addError('JS-куча ' + asText + ' - профилактическая перезагрузка')
                     reloadPage('профилактика OOM, JS-куча ' + asText, 'oom')
                 } else if (ratio >= MEMORY_RELOAD_RATIO - MEMORY_WARN_MARGIN && !jsHeapWarned) {
                     jsHeapWarned = true
@@ -3219,7 +3241,7 @@
                         if (maxDelay <= 0) {
                             if (maxRetries == 0) {
                                 addError("failed waiting " + title + " " + describeMismatch())
-                                diagLog('screen', 'не дождались: ' + title + ' ' + describeMismatch())
+                                diagLog('screen', 'не дождались: ' + title + ' ' + describeMismatch(), false)
                                 break
                             }
                             // =========== didn't see the required color => try to click again and wait one more time ==========
@@ -3230,7 +3252,7 @@
                                 await runActions([prevClickAction], macro)
                             } else {
                                 addError("skipped waiting " + lvlTitle + ": " + title + " " + describeMismatch())
-                                diagLog('screen', 'пропустили ожидание: ' + lvlTitle + ' / ' + title + ' ' + describeMismatch())
+                                diagLog('screen', 'пропустили ожидание: ' + lvlTitle + ' / ' + title + ' ' + describeMismatch(), false)
                                 if (RELOAD_PAGE_ON_FAILURE) {
                                     reloadPage('превышено число попыток: ' + lvlTitle + ' / ' + title, 'wrong_screen')
                                     return
