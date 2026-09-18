@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-13_v.1.8
+// @version      2026-09-18_v.1.9
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-13_v.1.8'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-18_v.1.9'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -51,7 +51,7 @@
         if (!DIAG_LOG_ENABLED) return
         try {
             const entries = JSON.parse(localStorage.getItem(DIAG_LOG_KEY)) || []
-            const line = String(text).slice(0, 300)
+            const line = String(text).slice(0, 600)
             const last = entries[entries.length - 1]
             // a message repeating back to back collapses into one entry with a counter
             if (last && last.kind === kind && last.text === line) {
@@ -1093,6 +1093,24 @@
                 return 'earth' // green
             }
             return 'water' // blue
+        }
+
+        // actionJumpIfScreen stays silent when a screen does not match, so when nothing matches at
+        // all the log shows a bare "Checking if we're on ..." loop and nothing to work from. This
+        // says what each pixel actually was, how far off it is and which one failed.
+        async function describeScreen(pixels, threshold = COLORS_MATCH_THRESHOLD) {
+            const actual = await readColorsAtCoords(
+                pixels.map(p => [gameArea.width * p.x * canvasScaleX, gameArea.height * p.y * canvasScaleY])
+            )
+            let matched = 0
+            const parts = pixels.map((p, i) => {
+                const got = actual[i] || []
+                const limit = p.threshold ?? threshold
+                const delta = Math.max(...p.color.map((c, k) => Math.abs(c - (got[k] ?? 0))))
+                if (delta <= limit) matched++
+                return '(' + p.x.toFixed(3) + ',' + p.y.toFixed(3) + ') ждали [' + p.color + '] видим [' + got + '] d' + delta + '/' + limit + (delta <= limit ? '' : ' X')
+            })
+            return matched + '/' + pixels.length + ' совпало: ' + parts.join('; ')
         }
 
         function colorsAreSame(color1, color2, threshold = COLORS_MATCH_THRESHOLD) {
@@ -3201,6 +3219,7 @@
                         if (maxDelay <= 0) {
                             if (maxRetries == 0) {
                                 addError("failed waiting " + title + " " + describeMismatch())
+                                diagLog('screen', 'не дождались: ' + title + ' ' + describeMismatch())
                                 break
                             }
                             // =========== didn't see the required color => try to click again and wait one more time ==========
@@ -3211,6 +3230,7 @@
                                 await runActions([prevClickAction], macro)
                             } else {
                                 addError("skipped waiting " + lvlTitle + ": " + title + " " + describeMismatch())
+                                diagLog('screen', 'пропустили ожидание: ' + lvlTitle + ' / ' + title + ' ' + describeMismatch())
                                 if (RELOAD_PAGE_ON_FAILURE) {
                                     reloadPage('превышено число попыток: ' + lvlTitle + ' / ' + title, 'wrong_screen')
                                     return
@@ -3699,6 +3719,11 @@
 
             let skipLogs = false
             let detectAttempts = 10
+            let detectDumped = false
+            const detectCandidates = [
+                [lvl(1), screenLvl1], [lvl(0), screenLvl0], [lvl(5), screenLvl5], [lvl(6), screenLvl6],
+                [floor1, screenFloor1Final], [floor2, screenFloor2Final], [lvl234, screenLvl234], [lvl789, screenLvl789]
+            ]
             while (skipUntilAction == null) {
                 await runActions([
                     {actionType: actionJumpIfScreen, pixels: screenLvl1, title: "Checking if we're on " + lvl(1), jumpTitle: lvl(1), skipLog: skipLogs},
@@ -3711,6 +3736,16 @@
                     {actionType: actionJumpIfScreen, pixels: screenLvl789, title: "Checking if we're on " + lvl789, jumpTitle: lvl789, skipLog: skipLogs},
                     delay(1000)
                 ], MACRO_DUNGEON, 0)
+
+                // first miss only: a dump per round would bury the log without adding anything
+                if (skipUntilAction == null && !detectDumped) {
+                    detectDumped = true
+                    diagLog('screen', 'ни один экран подземелья не распознан, разбор по точкам:')
+                    for (const [name, pixels] of detectCandidates) {
+                        if (isRunningMacro != MACRO_DUNGEON) break
+                        diagLog('screen', name + ' -> ' + await describeScreen(pixels))
+                    }
+                }
 
                 detectAttempts --
                 if (detectAttempts <= 0) {
