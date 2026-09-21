@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-18_v.2.0
+// @version      2026-09-21_v.2.1
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-18_v.2.0'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-21_v.2.1'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -722,7 +722,10 @@
     // Reloading a little early is free - the macro resumes itself after a reload (see LAST_MACRO_KEY) -
     // while hitting the ceiling costs the battle in progress and leaves a dead "Halting program" tab.
     // Tune with localStorage.WASM_RELOAD_RATIO / MEMORY_RELOAD_RATIO; 0 disables that half.
-    const MEMORY_CHECK_INTERVAL = 15000
+    // At the measured growth rate the window between the threshold and the ceiling is ~15 seconds,
+    // so a 15s poll landed on it at 95-100% - too late to be preventive. Reading byteLength is free.
+    const MEMORY_CHECK_INTERVAL = 2000
+    const JS_HEAP_CHECK_EVERY = 8
     const MEMORY_WARN_MARGIN = 0.15
     const MEMORY_RELOAD_RATIO = Number(localStorage.getItem('MEMORY_RELOAD_RATIO') || 0.85)
     const WASM_RELOAD_RATIO = Number(localStorage.getItem('WASM_RELOAD_RATIO') || 0.93)
@@ -730,8 +733,10 @@
     if (MEMORY_RELOAD_RATIO > 0 || WASM_RELOAD_RATIO > 0) {
         let jsHeapWarned = false
         let lastLoggedWasmMb = 0
+        let tick = 0
 
         setInterval(() => {
+            tick++
             const wasmBytes = wasmHeapBytes()
             if (wasmBytes) {
                 const wasmMb = Math.round(wasmBytes / 1048576)
@@ -747,7 +752,7 @@
                 }
             }
 
-            if (performance.memory && MEMORY_RELOAD_RATIO > 0 && MEMORY_RELOAD_RATIO <= 1) {
+            if (tick % JS_HEAP_CHECK_EVERY === 0 && performance.memory && MEMORY_RELOAD_RATIO > 0 && MEMORY_RELOAD_RATIO <= 1) {
                 const used = performance.memory.usedJSHeapSize
                 const limit = performance.memory.jsHeapSizeLimit
                 if (!limit) return
@@ -1099,7 +1104,8 @@
                     console.log('Wake Lock released')
                 })
             } catch (err) {
-                console.error(err)
+                // refused whenever the page is not visible - expected, not a fault
+                addError('Wake Lock недоступен: ' + (err && err.message ? err.message : err))
             }
         }
 
@@ -3232,10 +3238,26 @@
                     let testPixels = []
                     let allMatch = false
                     const describeMismatch = () => pixels.map((p, i) => "[" + testPixels[i] + "] != [" + p.color + "]").join(", ")
+                    let hiddenReported = false
                     do {
                         await sleep(100, macro)
                         maxDelay -= 100
                         if (isRunningMacro != macro) return
+
+                        // A hidden tab renders nothing: the pixels come back [0,0,0] and no screen
+                        // can ever match. Wait for the tab to come back instead of reloading blind.
+                        if (document.hidden) {
+                            if (!hiddenReported) {
+                                hiddenReported = true
+                                diagLog('hidden', 'вкладка скрыта на «' + title + '», ждём возврата без перезагрузки')
+                            }
+                            while (document.hidden && isRunningMacro == macro) {
+                                await sleep(1000, macro)
+                            }
+                            if (isRunningMacro != macro) return
+                            maxDelay = delay
+                            continue
+                        }
                         testPixels = await readColorsAtCoords(pixels.map(p => [(gameArea.width * p.x) * canvasScaleX, (gameArea.height * p.y) * canvasScaleY]))
                         allMatch = pixels.every((p, i) => colorsAreSame(testPixels[i], p.color, p.threshold ?? threshold))
                         if (maxDelay <= 0) {
@@ -3759,8 +3781,10 @@
                     delay(1000)
                 ], MACRO_DUNGEON, 0)
 
-                // first miss only: a dump per round would bury the log without adding anything
-                if (skipUntilAction == null && !detectDumped) {
+                // near the end of the budget only: on the first miss this fires during ordinary
+                // screen transitions (measured - the dump itself then matched 7/7), and having
+                // fired it would stay quiet for the failure actually worth seeing
+                if (skipUntilAction == null && !detectDumped && detectAttempts <= 3) {
                     detectDumped = true
                     diagLog('screen', 'ни один экран подземелья не распознан, разбор по точкам:')
                     for (const [name, pixels] of detectCandidates) {
