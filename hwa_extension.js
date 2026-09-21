@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-21_v.2.2
+// @version      2026-09-21_v.2.3
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-21_v.2.2'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-21_v.2.3'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -1135,27 +1135,50 @@
         // the wait for the home screen timed out into a reload, over and over.
         // Watch for a while instead, and close whatever shows up.
         const HOME_POPUP_WATCH_MS = 25000
-        // close buttons of the popups seen so far, in canvas-relative coordinates
+        const HOME_POPUP_BLIND_AFTER_MS = 8000
+        const HOME_POPUP_BLIND_EVERY_MS = 3000
+        // The close button sits in the same corner on every popup, but what is behind it does not:
+        // measured gold on one skin and green on another, at the same coordinates. Hence a list.
         const POPUP_CLOSE_POINTS = [
-            {x: 0.971644, y: 0.054499, color: [245, 209, 117], threshold: 20}
+            {x: 0.971644, y: 0.054499, color: [245, 209, 117], threshold: 20},
+            {x: 0.971527, y: 0.050058, color: [31, 124, 18], threshold: 20}
         ]
 
+        async function clickPopupClose(point, macro) {
+            await runActions(
+                [{x: point.x, y: point.y, actionType: actionClick, title: 'Closing popup', delay: 1000, skipLog: true}],
+                macro, 0
+            )
+        }
+
         async function closeHomePopups(macro) {
-            const deadline = Date.now() + HOME_POPUP_WATCH_MS
-            while (Date.now() < deadline && isRunningMacro == macro) {
+            const started = Date.now()
+            let lastBlindClick = 0
+
+            while (Date.now() - started < HOME_POPUP_WATCH_MS && isRunningMacro == macro) {
                 if (await screenMatches(screenHome, 20)) return true
 
                 let closed = false
                 for (const point of POPUP_CLOSE_POINTS) {
                     if (!(await screenMatches([point]))) continue
                     diagLog('popup', 'закрываем попап, крестик (' + point.x + ', ' + point.y + ')')
-                    await runActions(
-                        [{x: point.x, y: point.y, actionType: actionClick, title: 'Closing popup', delay: 1000, skipLog: true}],
-                        macro, 0
-                    )
+                    await clickPopupClose(point, macro)
                     closed = true
                     break
                 }
+
+                // Skins keep changing what sits behind the close button, so a colour check will
+                // always miss some new popup. The home screen is not up anyway, so clicking where
+                // the close button always sits costs nothing and gets us out of unknown skins too.
+                if (!closed &&
+                    Date.now() - started > HOME_POPUP_BLIND_AFTER_MS &&
+                    Date.now() - lastBlindClick > HOME_POPUP_BLIND_EVERY_MS) {
+                    lastBlindClick = Date.now()
+                    diagLog('popup', 'домашний экран не появился, клик вслепую по крестику')
+                    await clickPopupClose(POPUP_CLOSE_POINTS[0], macro)
+                    closed = true
+                }
+
                 if (!closed) await sleep(500, macro)
             }
             return false
