@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-21_v.2.1
+// @version      2026-09-21_v.2.2
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-21_v.2.1'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-21_v.2.2'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -160,7 +160,6 @@
 
     // ======== screens (control pixels used to detect game state) ==========
     // ============ Home ===========
-    const screenHomePopup = [{"x": 0.971644, "y": 0.054499, "color": [245,209,117]}]
     const screenHome = [{"x":0.647452,"y":0.907678,"color":[236,237,200]}, {"x": 0.883876, "y": 0.053931, "color": [254,255,97]}]
     const screenGuild = [{"x": 0.273832, "y": 0.612474, "color": [72,39,0]}, {"x": 0.241437, "y": 0.297075, "color": [213,21,26]}]
 
@@ -1121,6 +1120,45 @@
                 return 'earth' // green
             }
             return 'water' // blue
+        }
+
+        async function screenMatches(pixels, threshold = COLORS_MATCH_THRESHOLD) {
+            const actual = await readColorsAtCoords(
+                pixels.map(p => [gameArea.width * p.x * canvasScaleX, gameArea.height * p.y * canvasScaleY])
+            )
+            return pixels.every((p, i) => colorsAreSame(actual[i], p.color, p.threshold ?? threshold))
+        }
+
+        // Offers and event popups land on the home screen at unpredictable moments after a reload,
+        // sometimes a second or two after it has finished loading. The old sequence looked for one
+        // exactly twice and moved on, so a popup arriving a moment later was never closed - and then
+        // the wait for the home screen timed out into a reload, over and over.
+        // Watch for a while instead, and close whatever shows up.
+        const HOME_POPUP_WATCH_MS = 25000
+        // close buttons of the popups seen so far, in canvas-relative coordinates
+        const POPUP_CLOSE_POINTS = [
+            {x: 0.971644, y: 0.054499, color: [245, 209, 117], threshold: 20}
+        ]
+
+        async function closeHomePopups(macro) {
+            const deadline = Date.now() + HOME_POPUP_WATCH_MS
+            while (Date.now() < deadline && isRunningMacro == macro) {
+                if (await screenMatches(screenHome, 20)) return true
+
+                let closed = false
+                for (const point of POPUP_CLOSE_POINTS) {
+                    if (!(await screenMatches([point]))) continue
+                    diagLog('popup', 'закрываем попап, крестик (' + point.x + ', ' + point.y + ')')
+                    await runActions(
+                        [{x: point.x, y: point.y, actionType: actionClick, title: 'Closing popup', delay: 1000, skipLog: true}],
+                        macro, 0
+                    )
+                    closed = true
+                    break
+                }
+                if (!closed) await sleep(500, macro)
+            }
+            return false
         }
 
         // actionJumpIfScreen stays silent when a screen does not match, so when nothing matches at
@@ -3710,15 +3748,10 @@
                 const waitForHomeTitle = "Waiting for home screen"
                 const clickOnGuildTitle = "Click on guild"
 
-                const checkHomePopup = {pixels: screenHomePopup, actionType: actionJumpIfNotScreen, title: "Checking if there is a popup", jumpTitle: waitForHomeTitle}
-                const closeHomePopup = {x: 0.971644, y: 0.054499, actionType: actionClick, title: "Closing popup", delay: 1000}
+                addError(waitForHomeTitle)
+                await closeHomePopups(MACRO_DUNGEON)
 
                 await runActions([
-                    {pixels: screenHome, actionType: actionJumpIfScreen, title: waitForHomeTitle, jumpTitle: clickOnGuildTitle},
-                    checkHomePopup,
-                    closeHomePopup,
-                    checkHomePopup,
-                    closeHomePopup,
                     {pixels: screenHome, actionType: actionWaitForScreen, delay: 30000, title: waitForHomeTitle, threshold: 20},
                     {actionType: actionDelay, delay: 2000, title: clickOnGuildTitle}
                 ], MACRO_DUNGEON, 0)
@@ -3937,15 +3970,10 @@
                 // ========== initial game screen =============
                 const waitForHomeTitle = "Waiting for home screen"
 
-                const checkHomePopup = {pixels: screenHomePopup, actionType: actionJumpIfNotScreen, title: waitForHomeTitle}
-                const closeHomePopup = {x: 0.971644, y: 0.054499, actionType: actionClick, title: "Closing popup", delay: 1000}
+                addError(waitForHomeTitle)
+                await closeHomePopups(MACRO_FRONTIER)
 
                 await runActions([
-                    {pixels: screenHome, actionType: actionJumpIfScreen, title: waitForHomeTitle, jumpTitle: clickFrontierTitle},
-                    checkHomePopup,
-                    closeHomePopup,
-                    checkHomePopup,
-                    closeHomePopup,
                     {pixels: screenHome, actionType: actionWaitForScreen, delay: 30000, title: waitForHomeTitle},
                     delay(2000),
                 ], MACRO_FRONTIER, 0)
