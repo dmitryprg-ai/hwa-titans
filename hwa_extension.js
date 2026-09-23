@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-21_v.2.4
+// @version      2026-09-23_v.2.5
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-21_v.2.4'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-23_v.2.5'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -442,8 +442,10 @@
         const now = new Date();
         const time = now.toTimeString().slice(0, 8);
 
+        // the one-line status on the toolbar stays short; the panel line has room for a full
+        // screen dump, which used to be chopped mid-point at 200 characters
         const shortMsg = msg.slice(0, 200);
-        const text = "[" + time + "] " + shortMsg;
+        const text = "[" + time + "] " + msg.slice(0, 600);
         const span = document.createElement('div')
         span.textContent = text
 
@@ -1122,6 +1124,13 @@
             return 'water' // blue
         }
 
+        async function screenMatchRatio(pixels, threshold = COLORS_MATCH_THRESHOLD) {
+            const actual = await readColorsAtCoords(
+                pixels.map(p => [gameArea.width * p.x * canvasScaleX, gameArea.height * p.y * canvasScaleY])
+            )
+            return pixels.filter((p, i) => colorsAreSame(actual[i], p.color, p.threshold ?? threshold)).length / pixels.length
+        }
+
         async function screenMatches(pixels, threshold = COLORS_MATCH_THRESHOLD) {
             const actual = await readColorsAtCoords(
                 pixels.map(p => [gameArea.width * p.x * canvasScaleX, gameArea.height * p.y * canvasScaleY])
@@ -1136,6 +1145,8 @@
         // Watch for a while instead, and close whatever shows up.
         const HOME_POPUP_WATCH_MS = 25000
         const HOME_POPUP_CLICK_EVERY_MS = 2000
+        // stacked popups need one click each; past that something else is wrong
+        const MAX_DUNGEON_POPUP_CLICKS = 3
         // The close button sits in the same corner on every popup; only what shows through it
         // differs by skin (measured gold on one, green on another, same coordinates). So do not
         // look at the colour at all - while the home screen is not up, just click the corner.
@@ -3803,6 +3814,7 @@
             let skipLogs = false
             let detectAttempts = 10
             let detectDumped = false
+            let dungeonPopupClicks = 0
             const detectCandidates = [
                 [lvl(1), screenLvl1], [lvl(0), screenLvl0], [lvl(5), screenLvl5], [lvl(6), screenLvl6],
                 [floor1, screenFloor1Final], [floor2, screenFloor2Final], [lvl234, screenLvl234], [lvl789, screenLvl789]
@@ -3829,6 +3841,35 @@
                     for (const [name, pixels] of detectCandidates) {
                         if (isRunningMacro != MACRO_DUNGEON) break
                         diagLog('screen', name + ' -> ' + await describeScreen(pixels))
+                    }
+                }
+
+                // Popups also land in the middle of the dungeon - measured: every point of every
+                // candidate read as the same flat light blue. But a blind click on the close corner is
+                // not safe here, the way it is on the home screen: the dungeon's own exit button sits
+                // in that same corner (see leaveTowerTitle), so on a clean screen it would walk us out.
+                // What separates the two: with a popup over it no candidate matches even half its
+                // points, while an unrecognised but visible dungeon always has one that nearly does
+                // (the measured misses were 4/5 and 7/7). Only click in the first case.
+                if (skipUntilAction == null && detectAttempts <= 3 &&
+                    dungeonPopupClicks < MAX_DUNGEON_POPUP_CLICKS && !document.hidden) {
+                    let best = 0
+                    for (const [, pixels] of detectCandidates) {
+                        best = Math.max(best, await screenMatchRatio(pixels))
+                    }
+                    if (best < 0.5) {
+                        dungeonPopupClicks++
+                        diagLog('popup', 'подземелье закрыто попапом (лучшее совпадение ' + Math.round(best * 100) + '%), кликаем по крестику')
+                        await runActions(
+                            [{
+                                x: POPUP_CLOSE_POINT.x, y: POPUP_CLOSE_POINT.y,
+                                actionType: actionClick, title: 'Closing popup',
+                                delay: 1500, skipLog: true
+                            }],
+                            MACRO_DUNGEON, 0
+                        )
+                        // the round is spent on the popup, not on detection
+                        continue
                     }
                 }
 
