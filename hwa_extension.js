@@ -1102,14 +1102,15 @@
             }
         }
 
-        // The drawing buffer (preserveDrawingBuffer: false) only holds a picture in a frame the game
-        // actually drew - in any other frame it reads as pure black. Reading from a
-        // requestAnimationFrame callback, once per browser frame, was fine while the game drew every
-        // frame. Current builds skip frames: consecutive reads alternated between a real picture and
-        // [0,0,0] at every point, and on a still screen nearly every read came back black - even at
-        // coordinates taken straight from a mouse click. So read right after the game's own draw
-        // calls instead: the first draw of a frame queues a microtask, which runs once the game has
-        // finished that frame and before the browser presents it.
+        // The drawing buffer (preserveDrawingBuffer: false) only holds a picture between the game
+        // drawing a frame and the browser presenting it; outside that window it reads as pure black.
+        // The script used to read from its own requestAnimationFrame hook, which only works if that
+        // callback runs right after the game's. With the current build it did not: reads came back
+        // [0,0,0] at every point, even at coordinates taken straight from a mouse click - although
+        // tools/hwa_recorder.js measured the game drawing every single frame. Reading right after the
+        // game's own draw calls was never black (0 of ~420 checks) and matched every dungeon screen.
+        // So that is how it reads now: the first draw of a frame queues a microtask, which runs once
+        // the game has finished the frame and before the browser presents it.
         const READ_FALLBACK_MS = 1000
         let readQueued = false
 
