@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-10-07_v.2.6
+// @version      2026-10-07_v.2.7
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-07_v.2.6'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-07_v.2.7'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -1102,51 +1102,75 @@
             }
         }
 
-        const originalRAF = window.requestAnimationFrame.bind(window)
-        window.requestAnimationFrame = function(callback) {
-            return originalRAF(function(time) {
-                try {
-                    callback(time)
-                } finally {
-                }
+        // The drawing buffer (preserveDrawingBuffer: false) only holds a picture in a frame the game
+        // actually drew - in any other frame it reads as pure black. Reading from a
+        // requestAnimationFrame callback, once per browser frame, was fine while the game drew every
+        // frame. Current builds skip frames: consecutive reads alternated between a real picture and
+        // [0,0,0] at every point, and on a still screen nearly every read came back black - even at
+        // coordinates taken straight from a mouse click. So read right after the game's own draw
+        // calls instead: the first draw of a frame queues a microtask, which runs once the game has
+        // finished that frame and before the browser presents it.
+        const READ_FALLBACK_MS = 1000
+        let readQueued = false
 
-                const req = pendingRead
-                if (!req) return
-                pendingRead = null
+        function serviceRead() {
+            readQueued = false
+            const req = pendingRead
+            if (!req) return
+            pendingRead = null
 
-                const colors = req.coords.map(([x, y]) => {
-                    gl.readPixels(
-                        x,
-                        gl.canvas.height - y,
-                        1,
-                        1,
-                        gl.RGBA,
-                        gl.UNSIGNED_BYTE,
-                        pixels
-                    )
+            // read the screen itself, whatever the game left bound for its own work
+            const readFramebuffer = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING)
+            const packBuffer = gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING)
+            if (readFramebuffer) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
+            if (packBuffer) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
 
-                    return [pixels[0], pixels[1], pixels[2]]
-                })
-
-                // a real screen is never pure black at every sampled point, read after read
-                if (!document.hidden && colors.every(c => c[0] === 0 && c[1] === 0 && c[2] === 0)) {
-                    blackReadsInARow++
-                    if (blackReadsInARow === BLACK_READS_REPORT_AT) {
-                        diagLog('render', 'все пиксели читаются как [0,0,0] при видимой вкладке, ' + BLACK_READS_REPORT_AT +
-                            ' чтений подряд. ' + describeGameGeometry() + '. Пример координат чтения: ' +
-                            req.coords.slice(0, 2).map(([cx, cy]) => '(' + Math.round(cx) + ',' + Math.round(cy) + ')').join(' '))
-                    }
-                } else {
-                    blackReadsInARow = 0
-                }
-
-                req.resolve(colors)
+            const colors = req.coords.map(([x, y]) => {
+                gl.readPixels(x, gl.canvas.height - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
+                return [pixels[0], pixels[1], pixels[2]]
             })
+
+            if (packBuffer) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, packBuffer)
+            if (readFramebuffer) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFramebuffer)
+
+            // a real screen is never pure black at every sampled point, read after read
+            if (!document.hidden && colors.every(c => c[0] === 0 && c[1] === 0 && c[2] === 0)) {
+                blackReadsInARow++
+                if (blackReadsInARow === BLACK_READS_REPORT_AT) {
+                    diagLog('render', 'все пиксели читаются как [0,0,0] при видимой вкладке, ' + BLACK_READS_REPORT_AT +
+                        ' чтений подряд. ' + describeGameGeometry() + '. Пример координат чтения: ' +
+                        req.coords.slice(0, 2).map(([cx, cy]) => '(' + Math.round(cx) + ',' + Math.round(cy) + ')').join(' '))
+                }
+            } else {
+                blackReadsInARow = 0
+            }
+
+            req.resolve(colors)
+        }
+
+        const glProto = WebGL2RenderingContext.prototype
+        for (const name of ['drawElements', 'drawArrays', 'drawElementsInstanced', 'drawArraysInstanced', 'drawRangeElements', 'blitFramebuffer']) {
+            const original = glProto[name]
+            if (typeof original !== 'function') continue
+            glProto[name] = function (...args) {
+                const result = original.apply(this, args)
+                if (pendingRead && !readQueued && this === gl) {
+                    readQueued = true
+                    queueMicrotask(serviceRead)
+                }
+                return result
+            }
         }
 
         function readColorsAtCoords(coords) {
             return new Promise(resolve => {
-                pendingRead = { coords, resolve }
+                const req = { coords, resolve }
+                pendingRead = req
+                // a game that draws nothing for a whole second (frozen, hidden tab) would otherwise
+                // leave the read hanging forever; read whatever is there instead, as before
+                setTimeout(() => {
+                    if (pendingRead === req) serviceRead()
+                }, READ_FALLBACK_MS)
             })
         }
 
