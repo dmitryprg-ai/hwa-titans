@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-09-23_v.2.5
+// @version      2026-10-07_v.2.6
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-09-23_v.2.5'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-07_v.2.6'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -772,11 +772,28 @@
     }
 
     // ===== WAITING UNTIL GAME INITIALIZED =====
+    // #gameCanvas is in the page's static HTML, so its presence says nothing about the game being up -
+    // the old fixed 10s after it routinely fired while the game was still loading (memory still
+    // climbing), and whatever the script measured then stuck for the whole session. Wait for the
+    // game's own loader to go away and for the canvas to have a real size. GAME_LOAD_TIMEOUT keeps its
+    // meaning from the Delays panel - the minimum wait - and a loader that never hides is given up on
+    // after GAME_READY_MAX_WAIT.
+    const GAME_READY_SETTLE = 3000
+    const GAME_READY_MAX_WAIT = 90000
+    const gameWaitStarted = Date.now()
     const check = setInterval(async () => {
         const canvas = document.getElementById('gameCanvas')
-        if (canvas) {
+        if (!canvas) return
+
+        const loader = document.getElementById('gameLoader')
+        const loaderGone = !loader || getComputedStyle(loader).display === 'none'
+        const rect = canvas.getBoundingClientRect()
+        const ready = loaderGone && rect.width > 0 && rect.height > 0
+
+        const elapsed = Date.now() - gameWaitStarted
+        if ((ready && elapsed >= GAME_LOAD_TIMEOUT) || elapsed > GAME_READY_MAX_WAIT) {
             clearInterval(check)
-            setTimeout(async () => await startMainScript(canvas), GAME_LOAD_TIMEOUT)
+            setTimeout(async () => await startMainScript(canvas), ready ? GAME_READY_SETTLE : 0)
         }
     }, 200)
 
@@ -788,6 +805,29 @@
         let gameArea = gameCanvas.getBoundingClientRect()
         let canvasScaleX = gameCanvas.width / gameArea.width
         let canvasScaleY = gameCanvas.height / gameArea.height
+
+        // Every coordinate - for reading pixels and for clicking - is derived from this measurement.
+        // Taken once, a stale value put every read outside the picture (WebGL returns 0 there, hence
+        // [0,0,0] at every point of every screen) and every click into a dead spot, for the whole
+        // session. Re-measure every second and on resize; a zero-sized rect (canvas not laid out
+        // yet) is ignored rather than turned into an infinite scale.
+        function refreshGameGeometry() {
+            const rect = gameCanvas.getBoundingClientRect()
+            if (!(rect.width > 0 && rect.height > 0)) return
+            gameArea = rect
+            canvasScaleX = gameCanvas.width / rect.width
+            canvasScaleY = gameCanvas.height / rect.height
+        }
+        refreshGameGeometry()
+        setInterval(refreshGameGeometry, 1000)
+        window.addEventListener('resize', refreshGameGeometry)
+
+        function describeGameGeometry() {
+            return 'канвас ' + gameCanvas.width + 'x' + gameCanvas.height +
+                ', на экране ' + Math.round(gameArea.width) + 'x' + Math.round(gameArea.height) +
+                ' в ' + Math.round(gameArea.left) + ',' + Math.round(gameArea.top) +
+                ', масштаб ' + canvasScaleX.toFixed(2) + 'x' + canvasScaleY.toFixed(2)
+        }
 
         // MACRO stuff
 
@@ -928,6 +968,8 @@
         const gl = gameCanvas.getContext('webgl2')
         const pixels = new Uint8Array(4)
         let pendingRead = null
+        const BLACK_READS_REPORT_AT = 20
+        let blackReadsInARow = 0
 
         let isRecordingClicks = false
         let recordedClicks = []
@@ -1085,6 +1127,18 @@
 
                     return [pixels[0], pixels[1], pixels[2]]
                 })
+
+                // a real screen is never pure black at every sampled point, read after read
+                if (!document.hidden && colors.every(c => c[0] === 0 && c[1] === 0 && c[2] === 0)) {
+                    blackReadsInARow++
+                    if (blackReadsInARow === BLACK_READS_REPORT_AT) {
+                        diagLog('render', 'все пиксели читаются как [0,0,0] при видимой вкладке, ' + BLACK_READS_REPORT_AT +
+                            ' чтений подряд. ' + describeGameGeometry() + '. Пример координат чтения: ' +
+                            req.coords.slice(0, 2).map(([cx, cy]) => '(' + Math.round(cx) + ',' + Math.round(cy) + ')').join(' '))
+                    }
+                } else {
+                    blackReadsInARow = 0
+                }
 
                 req.resolve(colors)
             })
@@ -2735,7 +2789,7 @@
                         const jsHeap = performance.memory
                             ? '  |  JS-куча ' + Math.round(performance.memory.usedJSHeapSize / 1048576) + ' МБ'
                             : ''
-                        logMemory.textContent = describeWasmHeap() + jsHeap
+                        logMemory.textContent = describeWasmHeap() + jsHeap + '  |  ' + describeGameGeometry()
 
                         const text = formatDiagLog()
                         if (logBox.value === text) return
@@ -3647,9 +3701,7 @@
             localStorage.setItem("stopHPLimit", hpLimit)
 
             // init coordinate system
-            gameArea = gameCanvas.getBoundingClientRect()
-            canvasScaleX = gameCanvas.width / gameArea.width
-            canvasScaleY = gameCanvas.height / gameArea.height
+            refreshGameGeometry()
 
             // utils
             function delay(msec) {
@@ -3972,9 +4024,7 @@
             await enableWakeLock()
 
             gameCanvas.focus()
-            gameArea = gameCanvas.getBoundingClientRect()
-            canvasScaleX = gameCanvas.width / gameArea.width
-            canvasScaleY = gameCanvas.height / gameArea.height
+            refreshGameGeometry()
 
             const yTeam1 = 0.175539
             const yTeam5 = 0.858066
