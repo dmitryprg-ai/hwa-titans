@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-10-08_v.2.9
+// @version      2026-10-08_v.3.0
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-08_v.2.9'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-08_v.3.0'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -1273,6 +1273,23 @@
                 return '(' + p.x.toFixed(3) + ',' + p.y.toFixed(3) + ') ждали [' + p.color + '] видим [' + got + '] d' + delta + '/' + limit + (delta <= limit ? '' : ' X')
             })
             return matched + '/' + pixels.length + ' совпало: ' + parts.join('; ')
+        }
+
+        // Each titan's frame holds two thin strips: green health on top, yellow battle experience right
+        // under it. A single calibrated point missed the green strip on a tablet, so titans at full
+        // health read as dead and the macro stopped. Look at a patch around the point instead - fine
+        // vertical steps so a strip a couple of pixels tall cannot slip between them, and a little to
+        // the right but never to the left. The strip fills left to right, so green right of the
+        // threshold point still means "filled at least that far": the check gets no looser, while a
+        // point to the left would let a titan below the threshold through.
+        const HP_PATCH_DY = [0, -0.002, 0.002, -0.004, 0.004, -0.006, 0.006, -0.008, 0.008, -0.010, 0.010]
+        const HP_PATCH = [0, 0.004].flatMap(dx => HP_PATCH_DY.map(dy => [dx, dy]))
+
+        // filled = the calibrated green, or any clearly green pixel: another GPU or colour profile shifts
+        // the shade. The yellow experience strip below never passes - its green channel is no higher
+        // than its red - and nothing else around the frame is green.
+        function isHpBarFilled(c, expected, threshold) {
+            return colorsAreSame(c, expected, threshold) || (c[1] >= 120 && c[1] - c[0] >= 50 && c[1] - c[2] >= 50)
         }
 
         function colorsAreSame(color1, color2, threshold = COLORS_MATCH_THRESHOLD) {
@@ -3339,18 +3356,34 @@
 
                         isOk = true
                         for (let i = 0; i < xx.length; i++) {
-                            ;[testPixel] = await readColorsAtCoords([
-                                [gameArea.width * xx[i] * canvasScaleX, gameArea.height * y * canvasScaleY],
-                            ])
+                            let failed
+                            if (hpLimitText) {
+                                const patch = await readColorsAtCoords(HP_PATCH.map(([dx, dy]) =>
+                                    [gameArea.width * (xx[i] + dx) * canvasScaleX, gameArea.height * (y + dy) * canvasScaleY]))
+                                testPixel = patch[0]
+                                failed = !patch.some(c => isHpBarFilled(c, color, threshold))
+                                // the whole patch, once per titan per stop check: if it still misses on some
+                                // screen, this shows where the bar actually is
+                                if (failed && attempt === 0) {
+                                    diagLog('hp', 'титан ' + (i + 1) + ', пятно вокруг (' + xx[i].toFixed(3) + ', ' + y + '): ' +
+                                        patch.map((c, k) => '(' + HP_PATCH[k][0] + ',' + HP_PATCH[k][1] + ')[' + c + ']').join(' '), false)
+                                }
+                            } else {
+                                ;[testPixel] = await readColorsAtCoords([
+                                    [gameArea.width * xx[i] * canvasScaleX, gameArea.height * y * canvasScaleY],
+                                ])
+                                failed = (actionType == actionInterruptIfColor && colorsAreSame(testPixel, color, threshold)) ||
+                                    (actionType == actionInterruptIfNotColor && !colorsAreSame(testPixel, color, threshold))
+                            }
 
-                            if ((actionType == actionInterruptIfColor && colorsAreSame(testPixel, color, threshold)) || (actionType == actionInterruptIfNotColor && !colorsAreSame(testPixel, color, threshold))) {
+                            if (failed) {
                                 isOk = false
                                 titanI = i
                                 titanX = xx[i]
                                 // "HP check failed for 5 titans" read like a breakdown; it is the stop
                                 // setting doing its job, so say which titan and against what
                                 addError(hpLimitText
-                                    ? 'Титан ' + (i + 1) + ': здоровье ниже порога «' + hpLimitText + '» (цвет полоски [' + testPixel + ']), попытка ' + (attempt + 1) + ' из ' + CHECK_RETRIES + ', следующая через 5 с'
+                                    ? 'Титан ' + (i + 1) + ': здоровье ниже порога «' + hpLimitText + '», зелёного на полоске нет (в точке [' + testPixel + ']), попытка ' + (attempt + 1) + ' из ' + CHECK_RETRIES + ', следующая через 5 с'
                                     : 'Check failed at ' + xx[i] + ',' + y + ' [' + testPixel + '], attempt ' + (attempt + 1) + ' of ' + CHECK_RETRIES)
                                 break
                             }
