@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-10-08_v.2.8
+// @version      2026-10-08_v.2.9
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-08_v.2.8'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-08_v.2.9'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -2490,6 +2490,33 @@
                     })
                     settingsPanel.appendChild(settingsVersion)
 
+                    // Every coordinate in the script was calibrated on a 1879x859 game area. The game lays
+                    // its UI out by the shape of the screen, so on a clearly different shape clicks and
+                    // checks would miss. Measured so far: a desktop browser 2.19:1, an Android tablet in
+                    // landscape ~2.17:1 - the same, so there is a single set of coordinates for now.
+                    const CALIBRATED_ASPECT = 1879 / 859
+                    const DISPLAY_ASPECT_TOLERANCE = 0.05
+                    const settingsDisplay = document.createElement('div')
+                    Object.assign(settingsDisplay.style, {
+                        fontSize: '12px',
+                        textAlign: 'center',
+                        marginBottom: '10px'
+                    })
+                    settingsPanel.appendChild(settingsDisplay)
+
+                    function updateDisplayFit() {
+                        if (!(gameArea.width > 0 && gameArea.height > 0)) return
+                        const aspect = gameArea.width / gameArea.height
+                        const fits = Math.abs(aspect / CALIBRATED_ASPECT - 1) <= DISPLAY_ASPECT_TOLERANCE
+                        settingsDisplay.textContent = 'Display: ' + Math.round(gameArea.width) + 'x' + Math.round(gameArea.height) +
+                            ' (' + aspect.toFixed(2) + ':1) - ' +
+                            (fits ? 'совпадает с калибровкой ' + CALIBRATED_ASPECT.toFixed(2) + ':1'
+                                  : 'отличается от калибровки ' + CALIBRATED_ASPECT.toFixed(2) + ':1, клики и проверки могут промахиваться')
+                        settingsDisplay.style.color = fits ? '#8fd18f' : '#ffb35c'
+                    }
+                    updateDisplayFit()
+                    setInterval(updateDisplayFit, 2000)
+
                     function makeSettingCheckbox(labelText, storageKey, getValue, setValue) {
                         const label = document.createElement('label')
                         Object.assign(label.style, {
@@ -3296,8 +3323,10 @@
                         await sleep(delay, macro)
                     }
                 } else if (actionType == actionInterruptIfColor || actionType == actionInterruptIfNotColor) {
-                    const { xx = [], y = 0, color = [], threshold = COLORS_MATCH_THRESHOLD } = action
+                    const { xx = [], y = 0, color = [], threshold = COLORS_MATCH_THRESHOLD, hpLimit = null } = action
                     const CHECK_RETRIES = 10
+                    // the wording of the "Stop macro if" options in the Dungeon tab
+                    const hpLimitText = hpLimit == null ? null : hpLimit === 0 ? 'Titan dies' : 'HP < ' + hpLimit + '%'
                     let isOk = true
                     let titanI = 0
                     let titanX = 0
@@ -3318,7 +3347,11 @@
                                 isOk = false
                                 titanI = i
                                 titanX = xx[i]
-                                addError("HP check failed for " + xx.length + " titans")
+                                // "HP check failed for 5 titans" read like a breakdown; it is the stop
+                                // setting doing its job, so say which titan and against what
+                                addError(hpLimitText
+                                    ? 'Титан ' + (i + 1) + ': здоровье ниже порога «' + hpLimitText + '» (цвет полоски [' + testPixel + ']), попытка ' + (attempt + 1) + ' из ' + CHECK_RETRIES + ', следующая через 5 с'
+                                    : 'Check failed at ' + xx[i] + ',' + y + ' [' + testPixel + '], attempt ' + (attempt + 1) + ' of ' + CHECK_RETRIES)
                                 break
                             }
                         }
@@ -3329,15 +3362,23 @@
                     }
 
                     if (!isOk) {
-                        const error = lvlTitle + ": " + (titanI + 1) + " titan's HP is tooo low [" + testPixel[0] + "," + testPixel[1] + "," + testPixel[2] + "] at (" + titanX + "," + y + ")"
+                        const error = hpLimitText
+                            ? lvlTitle + ': у титана ' + (titanI + 1) + ' здоровье ниже порога «' + hpLimitText + '» (цвет полоски [' + testPixel + '] в точке ' + titanX.toFixed(3) + ', ' + y + ').\n' +
+                              'Макрос остановлен намеренно - так работает настройка «Stop macro if» во вкладке Dungeon. ' +
+                              'Если останавливаться не нужно, выбери там «Titan dies» или «Never».'
+                            : lvlTitle + ": " + (titanI + 1) + " titan's HP is tooo low [" + testPixel[0] + "," + testPixel[1] + "," + testPixel[2] + "] at (" + titanX + "," + y + ")"
                         addError(error)
+                        diagLog('stop', error.replace('\n', ' '), false)
                         if (isRunningMacro == macro) {
                             setActivated(dailyButton, false, BUTTON_TEXT_STOP_CUSTOM, BUTTON_TEXT_RUN_CUSTOM)
                             isRunningMacro = null
                             await releaseWakeLock()
 
                             localStorage.setItem(LAST_MACRO_KEY, null)
-                            if (ranLongEnoughForResultsPopup()) {
+                            // a deliberate HP stop always explains itself: the first battle plus ten 5s
+                            // retries ends at ~56s, just under the one-minute floor for the results
+                            // popup, so the macro used to stop without a word
+                            if (hpLimitText || ranLongEnoughForResultsPopup()) {
                                 showMacroErrorPopup(`${error}\n\n${getMacroSessionSummary()}`)
                             }
                             await sendTelegramNotify(error)
@@ -3765,8 +3806,8 @@
             let checkHP4 = skipCheckHP
             const check5TitansHpTitle = "Check 5 titans HP"
             if (titansHP5[0] > 0) {
-                checkHP5 = {xx: titansHP5, y: 0.461, color: [56,199,28], actionType: actionInterruptIfNotColor, title: check5TitansHpTitle, threshold: 20}
-                checkHP4 = {xx: titansHP4, y: 0.461, color: [56,199,28], actionType: actionInterruptIfNotColor, title: "Check 4 titans HP", threshold: 20}
+                checkHP5 = {xx: titansHP5, y: 0.461, color: [56,199,28], actionType: actionInterruptIfNotColor, title: check5TitansHpTitle, threshold: 20, hpLimit}
+                checkHP4 = {xx: titansHP4, y: 0.461, color: [56,199,28], actionType: actionInterruptIfNotColor, title: "Check 4 titans HP", threshold: 20, hpLimit}
             }
 
             let checkIf5Titans = {pixels: popupBattleResult5Titans, actionType: actionJumpIfScreen, title: "Check if there are 5 titans", threshold: 20, jumpTitle: check5TitansHpTitle}
