@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-10-07_v.2.7
+// @version      2026-10-08_v.2.8
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-07_v.2.7'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-08_v.2.8'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -3231,7 +3231,10 @@
             target.focus()
 
             let skipActions = 0
-            let prevClickAction = actions[0]
+            // Only a click can be repeated. This used to start as actions[0] whatever it was, so in a list
+            // opening with a wait (the frontier battle loop does) the "previous click" was that very wait:
+            // a failed wait re-ran itself with a fresh retry count, forever, and never reached the reload.
+            let prevClickAction = null
             for (const action of actions) {
                 if (isRunningMacro != macro) return
 
@@ -3402,10 +3405,10 @@
                             }
                             // =========== didn't see the required color => try to click again and wait one more time ==========
                             if (retries > 0) {
-                                addError("re-clicking (retries:" + retries + ") " + title + " " + describeMismatch())
+                                addError((prevClickAction ? "re-clicking" : "waiting again") + " (retries:" + retries + ") " + title + " " + describeMismatch())
                                 retries--
                                 maxDelay = MAX_WAIT_BEFORE_RETRY
-                                await runActions([prevClickAction], macro)
+                                if (prevClickAction) await runActions([prevClickAction], macro)
                             } else {
                                 addError("skipped waiting " + lvlTitle + ": " + title + " " + describeMismatch())
                                 diagLog('screen', 'пропустили ожидание: ' + lvlTitle + ' / ' + title + ' ' + describeMismatch(), false)
