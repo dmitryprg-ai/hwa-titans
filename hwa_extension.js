@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-10-08_v.3.0
+// @version      2026-10-21_v.3.1
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-08_v.3.0'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-21_v.3.1'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -412,6 +412,25 @@
             el.style.fontStyle = 'italic'
             el.style.color = 'rgba(188, 214, 245, 0.8)'
         }
+    }
+
+    // navigator.clipboard is refused in some browsers and webviews (no permission, unfocused document),
+    // and the copy buttons left that refusal unhandled - it landed in the error log as an error.
+    // Fall back to selecting the text in a throwaway textarea and copying it the old way.
+    async function copyToClipboard(text) {
+        try {
+            await navigator.clipboard.writeText(text)
+            return true
+        } catch {}
+        const area = document.createElement('textarea')
+        area.value = text
+        Object.assign(area.style, { position: 'fixed', left: '-9999px', top: '0' })
+        document.body.appendChild(area)
+        area.select()
+        let copied = false
+        try { copied = document.execCommand('copy') } catch {}
+        area.remove()
+        return copied
     }
 
     const MAX_LOG_LINES = 100
@@ -967,7 +986,9 @@
         // Pixel color picker
         const gl = gameCanvas.getContext('webgl2')
         const pixels = new Uint8Array(4)
-        let pendingRead = null
+        // Several readers can wait at once - the macro, "Log all clicks and colors", the recorder. With a
+        // single slot, a second request overwrote the first, and whoever was waiting on it hung for good.
+        let pendingReads = []
         const BLACK_READS_REPORT_AT = 20
         let blackReadsInARow = 0
 
@@ -1113,12 +1134,15 @@
         // the game has finished the frame and before the browser presents it.
         const READ_FALLBACK_MS = 1000
         let readQueued = false
+        // false when the last batch was read by the fallback timer, i.e. from whatever was left in the
+        // buffer rather than a frame the game had just drawn - usually an empty, black one
+        let lastReadFromFrame = true
 
-        function serviceRead() {
+        function serviceRead(fromFrame = false) {
             readQueued = false
-            const req = pendingRead
-            if (!req) return
-            pendingRead = null
+            if (!pendingReads.length) return
+            lastReadFromFrame = fromFrame
+            const batch = pendingReads.splice(0)
 
             // read the screen itself, whatever the game left bound for its own work
             const readFramebuffer = gl.getParameter(gl.READ_FRAMEBUFFER_BINDING)
@@ -1126,27 +1150,29 @@
             if (readFramebuffer) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null)
             if (packBuffer) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null)
 
-            const colors = req.coords.map(([x, y]) => {
+            const results = batch.map(req => req.coords.map(([x, y]) => {
                 gl.readPixels(x, gl.canvas.height - y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
                 return [pixels[0], pixels[1], pixels[2]]
-            })
+            }))
 
             if (packBuffer) gl.bindBuffer(gl.PIXEL_PACK_BUFFER, packBuffer)
             if (readFramebuffer) gl.bindFramebuffer(gl.READ_FRAMEBUFFER, readFramebuffer)
 
-            // a real screen is never pure black at every sampled point, read after read
-            if (!document.hidden && colors.every(c => c[0] === 0 && c[1] === 0 && c[2] === 0)) {
-                blackReadsInARow++
-                if (blackReadsInARow === BLACK_READS_REPORT_AT) {
-                    diagLog('render', 'все пиксели читаются как [0,0,0] при видимой вкладке, ' + BLACK_READS_REPORT_AT +
-                        ' чтений подряд. ' + describeGameGeometry() + '. Пример координат чтения: ' +
-                        req.coords.slice(0, 2).map(([cx, cy]) => '(' + Math.round(cx) + ',' + Math.round(cy) + ')').join(' '))
+            batch.forEach((req, i) => {
+                const colors = results[i]
+                // a real screen is never pure black at every sampled point, read after read
+                if (!document.hidden && colors.length && colors.every(c => c[0] === 0 && c[1] === 0 && c[2] === 0)) {
+                    blackReadsInARow++
+                    if (blackReadsInARow === BLACK_READS_REPORT_AT) {
+                        diagLog('render', 'все пиксели читаются как [0,0,0] при видимой вкладке, ' + BLACK_READS_REPORT_AT +
+                            ' чтений подряд. ' + describeGameGeometry() + '. Пример координат чтения: ' +
+                            req.coords.slice(0, 2).map(([cx, cy]) => '(' + Math.round(cx) + ',' + Math.round(cy) + ')').join(' '))
+                    }
+                } else {
+                    blackReadsInARow = 0
                 }
-            } else {
-                blackReadsInARow = 0
-            }
-
-            req.resolve(colors)
+                req.resolve(colors)
+            })
         }
 
         const glProto = WebGL2RenderingContext.prototype
@@ -1155,9 +1181,9 @@
             if (typeof original !== 'function') continue
             glProto[name] = function (...args) {
                 const result = original.apply(this, args)
-                if (pendingRead && !readQueued && this === gl) {
+                if (pendingReads.length && !readQueued && this === gl) {
                     readQueued = true
-                    queueMicrotask(serviceRead)
+                    queueMicrotask(() => serviceRead(true))
                 }
                 return result
             }
@@ -1166,13 +1192,209 @@
         function readColorsAtCoords(coords) {
             return new Promise(resolve => {
                 const req = { coords, resolve }
-                pendingRead = req
+                pendingReads.push(req)
                 // a game that draws nothing for a whole second (frozen, hidden tab) would otherwise
                 // leave the read hanging forever; read whatever is there instead, as before
                 setTimeout(() => {
-                    if (pendingRead === req) serviceRead()
+                    if (pendingReads.includes(req)) serviceRead()
                 }, READ_FALLBACK_MS)
             })
+        }
+
+        // ============ RECORDER ============
+        // tools/hwa_recorder.js built in, for players who will not open DevTools - and a tablet has none.
+        // Records the screens as the macro's own signatures see them, every tap with its coordinates and
+        // colour, drags, marks the player types in, and a colour grid for screens nothing matches. It
+        // resumes by itself after a page reload until stopped, so a reload mid-walkthrough loses nothing.
+        const REC_LOG_KEY = 'recLog'
+        const REC_ON_KEY = 'recOn'
+        const REC_MAX_LINES = 3000
+        const REC_SCREEN_EVERY_MS = 2000
+        const REC_GRID_COLS = 6
+        const REC_GRID_ROWS = 4
+        const REC_SCREENS = {
+            screenHome, screenGuild, screenLvl1, screenLvl234, screenLvl789, screenLvl5, screenFloor1Final, screenLvl6,
+            screenLvl0, screenFloor2Final, popupOneRoomSelection, popupTwoRoomsSelection, screenBattlefield, popupBattleResult,
+            popupBattleResult5Titans, popupFloorReward, screenFrontier, screenBattlePrep, screenLose, screenReorderTeams,
+            screenExpeditionOpened, screenValkyrieGift, screenHydraNoMoreFairies, screenTowerChestAvailable, screenTowerRewardPopup,
+            screenCampAttackButton, screenCampBattleTransition, screenCampPopupAttackButton, screenCampBattleEnd,
+            screenCampSearchClosed, screenChestRewardPopup, screenFreeChestAvailable
+        }
+        const REC_GRID = []
+        for (let row = 0; row < REC_GRID_ROWS; row++) {
+            for (let col = 0; col < REC_GRID_COLS; col++) {
+                REC_GRID.push({ x: (col + 0.5) / REC_GRID_COLS, y: (row + 0.5) / REC_GRID_ROWS })
+            }
+        }
+
+        let recLines = []
+        try { recLines = JSON.parse(localStorage.getItem(REC_LOG_KEY)) || [] } catch {}
+        let recOn = false
+        let recStartedAt = 0
+        let recTimer = null
+        let recBusy = false
+        let recLastScreenKey = null
+        let recLastGrid = null
+        let recLastGeometry = ''
+        let recCurrentScreen = ''
+        let recPointer = null
+        let recPersistTimer = null
+        const recScreensSeen = {}
+
+        function recAdd(kind, text) {
+            recLines.push(new Date().toLocaleTimeString('ru-RU', { hour12: false }) + ' [' + kind + '] ' + text)
+            if (recLines.length > REC_MAX_LINES) recLines.splice(0, recLines.length - REC_MAX_LINES)
+            if (recPersistTimer == null) recPersistTimer = setTimeout(recPersist, 1000)
+        }
+
+        function recPersist() {
+            if (recPersistTimer != null) {
+                clearTimeout(recPersistTimer)
+                recPersistTimer = null
+            }
+            try { localStorage.setItem(REC_LOG_KEY, JSON.stringify(recLines)) } catch {}
+        }
+        window.addEventListener('pagehide', recPersist)
+
+        const recFraction = e => [(e.clientX - gameArea.left) / gameArea.width, (e.clientY - gameArea.top) / gameArea.height]
+        const recPixel = (fx, fy) => [gameArea.width * fx * canvasScaleX, gameArea.height * fy * canvasScaleY]
+        const recPoint = (fx, fy) => '(' + fx.toFixed(6) + ', ' + fy.toFixed(6) + ')'
+        const recHex = c => '#' + c.map(v => v.toString(16).padStart(2, '0')).join('')
+
+        async function recCheckScreen() {
+            if (!recOn || recBusy || document.hidden) return
+            recBusy = true
+            try {
+                const geometry = describeGameGeometry()
+                if (geometry !== recLastGeometry) {
+                    recLastGeometry = geometry
+                    recAdd('canvas', geometry)
+                }
+
+                // every signature plus the grid, in one read
+                const names = Object.keys(REC_SCREENS)
+                const points = names.flatMap(name => REC_SCREENS[name]).concat(REC_GRID)
+                const colors = await readColorsAtCoords(points.map(p => recPixel(p.x, p.y)))
+                if (!recOn) return
+                // an undrawn frame reads black, which "matches" one-pixel near-black signatures
+                // (screenReorderTeams among them) - skip it rather than log a screen that never was
+                if (!lastReadFromFrame) return
+
+                let k = 0
+                const results = names.map(name => {
+                    let ok = 0
+                    for (const p of REC_SCREENS[name]) {
+                        if (colorsAreSame(colors[k++], p.color, p.threshold ?? 15)) ok++
+                    }
+                    return { name, ok, n: REC_SCREENS[name].length }
+                })
+                const grid = colors.slice(k)
+
+                const full = results.filter(r => r.ok === r.n)
+                let key, text
+                if (full.length) {
+                    key = full.map(r => r.name).join(', ')
+                    text = 'опознан: ' + full.map(r => r.name + ' (' + r.ok + '/' + r.n + ')').join(', ')
+                    recCurrentScreen = key
+                } else {
+                    const near = results.filter(r => r.ok > 0).sort((a, b) => b.ok / b.n - a.ok / a.n).slice(0, 3)
+                    key = 'none'
+                    text = 'не опознан' + (near.length ? '; ближе всего ' + near.map(r => r.name + ' ' + r.ok + '/' + r.n).join(', ') : '')
+                    recCurrentScreen = 'не опознан'
+                }
+                if (key !== recLastScreenKey) {
+                    recLastScreenKey = key
+                    recAdd('screen', text)
+                    for (const r of full) recScreensSeen[r.name] = (recScreensSeen[r.name] || 0) + 1
+                }
+
+                // a screen nothing matches gets a colour grid, so new screens and popups can be told apart
+                if (!full.length) {
+                    const changed = !recLastGrid || grid.reduce((sum, c, i) =>
+                        sum + Math.abs(c[0] - recLastGrid[i][0]) + Math.abs(c[1] - recLastGrid[i][1]) + Math.abs(c[2] - recLastGrid[i][2]), 0) / grid.length > 40
+                    if (changed) {
+                        recLastGrid = grid
+                        recAdd('grid', 'сетка ' + REC_GRID_COLS + 'x' + REC_GRID_ROWS + ' (строки сверху вниз): ' + grid.map(recHex).join(' '))
+                    }
+                } else {
+                    recLastGrid = null
+                }
+            } finally {
+                recBusy = false
+            }
+        }
+
+        // the player's taps are trusted pointer events; the macro dispatches plain mouse events
+        gameCanvas.addEventListener('pointerdown', e => {
+            if (!recOn || !e.isTrusted) return
+            const [fx, fy] = recFraction(e)
+            recPointer = { fx, fy, at: performance.now() }
+            readColorsAtCoords([recPixel(fx, fy)]).then(([color]) => {
+                if (recOn) recAdd('tap', JSON.stringify({ x: Number(fx.toFixed(6)), y: Number(fy.toFixed(6)), color }) +
+                    (lastReadFromFrame ? '' : ' (игра не рисовала кадр - цвет недостоверен)'))
+            })
+        }, true)
+        window.addEventListener('pointerup', e => {
+            if (!recOn || !e.isTrusted || !recPointer) return
+            const [fx, fy] = recFraction(e)
+            if (Math.hypot(fx - recPointer.fx, fy - recPointer.fy) > 0.02) {
+                recAdd('drag', 'от ' + recPoint(recPointer.fx, recPointer.fy) + ' до ' + recPoint(fx, fy) + ', ' + Math.round(performance.now() - recPointer.at) + ' мс')
+            }
+            recPointer = null
+        }, true)
+        gameCanvas.addEventListener('mousedown', e => {
+            if (!recOn || e.isTrusted) return
+            const [fx, fy] = recFraction(e)
+            recAdd('macro', 'клик макроса ' + recPoint(fx, fy))
+        }, true)
+        document.addEventListener('visibilitychange', () => {
+            if (recOn) recAdd('tab', document.hidden ? 'вкладка скрыта' : 'вкладка снова видна')
+        })
+
+        function recDevice() {
+            const ua = navigator.userAgent
+            const os = (ua.match(/Android [\d.]+|iPad|iPhone|Windows NT [\d.]+|Mac OS X [\d_]+|Linux/) || ['?'])[0]
+            const browser = (ua.match(/Edg\/[\d.]+|Chrome\/[\d.]+|Firefox\/[\d.]+|Version\/[\d.]+ Safari/) || ['?'])[0]
+            return os + ', ' + browser + ', dpr ' + devicePixelRatio
+        }
+
+        function recStart(resumed = false) {
+            if (recOn) return
+            recOn = true
+            recStartedAt = Date.now()
+            recLastScreenKey = null
+            recLastGrid = null
+            recLastGeometry = ''
+            localStorage.setItem(REC_ON_KEY, 'true')
+            recAdd('start', (resumed ? 'запись продолжена после перезагрузки страницы' : 'запись начата') +
+                '; версия ' + SCRIPT_VERSION + '; ' + recDevice())
+            recTimer = setInterval(recCheckScreen, REC_SCREEN_EVERY_MS)
+            recCheckScreen()
+        }
+
+        function recStop() {
+            if (!recOn) return
+            recOn = false
+            clearInterval(recTimer)
+            recTimer = null
+            localStorage.setItem(REC_ON_KEY, 'false')
+            recAdd('stop', 'запись остановлена')
+            recPersist()
+        }
+
+        function recMark(text) {
+            if (text) recAdd('mark', text)
+        }
+
+        function recClear() {
+            recLines = []
+            recPersist()
+        }
+
+        function recFormat() {
+            const seen = Object.entries(recScreensSeen).map(([name, n]) => name + ' x' + n).join(', ') || 'нет'
+            return '=== запись HWA, версия ' + SCRIPT_VERSION + ' ===\n' + recDevice() + '\n' + describeGameGeometry() +
+                '\nопознанные экраны с последней загрузки страницы: ' + seen + '\n\n' + recLines.join('\n')
         }
 
         let wakeLock = null
@@ -2917,6 +3139,127 @@
                     }, 2000)
                 }
 
+                // =========== RECORDER ===========
+                function buildRecorderPanel() {
+                    const recPanel = makeDailyPopupPanel('Recorder', '⏺️')
+
+                    const recTitle = document.createElement('div')
+                    recTitle.textContent = 'Recorder'
+                    Object.assign(recTitle.style, {
+                        fontWeight: 'bold',
+                        marginBottom: '8px',
+                        color: '#eef7ff',
+                        textAlign: 'center'
+                    })
+                    recPanel.appendChild(recTitle)
+
+                    const recHint = document.createElement('div')
+                    recHint.textContent = 'Запись для диагностики. Нажми «Начать запись» и пройди руками нужные экраны. ' +
+                        'Перед каждым шагом жми «Отметка» и коротко подпиши, что делаешь. В конце - «Копировать» и пришли текст. ' +
+                        'Запись продолжается и после перезагрузки страницы, пока её не остановить.'
+                    Object.assign(recHint.style, {
+                        color: '#8fa8c4',
+                        fontSize: '11px',
+                        margin: '0 0 8px'
+                    })
+                    recPanel.appendChild(recHint)
+
+                    const recStatus = document.createElement('div')
+                    Object.assign(recStatus.style, {
+                        fontSize: '12px',
+                        fontFamily: 'monospace',
+                        margin: '0 0 8px'
+                    })
+                    recPanel.appendChild(recStatus)
+
+                    const recButtons = document.createElement('div')
+                    Object.assign(recButtons.style, {
+                        display: 'flex',
+                        flexWrap: 'wrap',
+                        gap: '8px',
+                        justifyContent: 'center',
+                        marginBottom: '8px'
+                    })
+                    recPanel.appendChild(recButtons)
+
+                    const recBox = document.createElement('textarea')
+                    recBox.readOnly = true
+                    recBox.rows = 12
+                    recBox.placeholder = 'Пока ничего не записано'
+                    Object.assign(recBox.style, inputStyle, {
+                        display: 'block',
+                        width: '100%',
+                        boxSizing: 'border-box',
+                        resize: 'vertical',
+                        fontFamily: 'monospace',
+                        fontSize: '11px'
+                    })
+                    recPanel.appendChild(recBox)
+
+                    function makeRecButton(text, onClick) {
+                        const button = document.createElement('button')
+                        button.textContent = text
+                        Object.assign(button.style, greenButtonStyle, { width: 'fit-content' })
+                        button.addEventListener('click', (e) => {
+                            e.stopPropagation()
+                            onClick(button)
+                            render()
+                        })
+                        recButtons.appendChild(button)
+                        return button
+                    }
+
+                    const toggleButton = makeRecButton('Начать запись', () => {
+                        if (recOn) recStop()
+                        else recStart()
+                    })
+                    makeRecButton('Отметка', () => {
+                        recMark(prompt('Что сейчас делаешь? Например: «нажимаю крестик»') || '')
+                    })
+                    makeRecButton('Копировать', async (button) => {
+                        recPersist()
+                        const text = recFormat()
+                        const copied = await copyToClipboard(text)
+                        if (!copied) {
+                            // nothing worked: leave the whole text selected, a long press copies it on a tablet
+                            recBox.value = text
+                            recBox.focus()
+                            recBox.select()
+                        }
+                        const original = button.textContent
+                        button.textContent = copied ? 'Скопировано' : 'Выдели текст вручную'
+                        setTimeout(() => { button.textContent = original }, 1500)
+                    })
+                    makeRecButton('Очистить', () => {
+                        if (confirm('Удалить всю запись?')) recClear()
+                    })
+
+                    function render() {
+                        if (recOn) {
+                            const sec = Math.round((Date.now() - recStartedAt) / 1000)
+                            recStatus.textContent = '● идёт запись ' + Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0') +
+                                (recCurrentScreen ? '  |  экран: ' + recCurrentScreen : '') + '  |  строк: ' + recLines.length
+                            recStatus.style.color = '#ff8a8a'
+                        } else {
+                            recStatus.textContent = 'запись остановлена  |  строк: ' + recLines.length
+                            recStatus.style.color = '#8fa8c4'
+                        }
+                        toggleButton.textContent = recOn ? 'Остановить запись' : 'Начать запись'
+
+                        const text = recLines.join('\n')
+                        if (recBox.value !== text) {
+                            const atBottom = recBox.scrollTop + recBox.clientHeight >= recBox.scrollHeight - 4
+                            recBox.value = text
+                            if (atBottom) recBox.scrollTop = recBox.scrollHeight
+                        }
+                    }
+
+                    render()
+                    setInterval(() => {
+                        if (recPanel.style.display !== 'none') render()
+                    }, 1000)
+                }
+
                 buildDungeonPanel()
                 buildFrontierPanel()
                 buildDailyTasksPanel()
@@ -2924,6 +3267,7 @@
                 buildDelaysPanel()
                 buildSettingsPanel()
                 buildLogPanel()
+                buildRecorderPanel()
 
                 activateDailyPopupSection(dailyPopupSections[0])
 
@@ -3023,7 +3367,7 @@
                 copyErrorsButton.addEventListener('click', (e) => {
                     e.stopPropagation()
                     const text = Array.from(errorContainerEl.querySelectorAll('div')).map(s => s.textContent).join('\n')
-                    navigator.clipboard.writeText(text)
+                    copyToClipboard(text)
                 })
                 logsButtonsRow.appendChild(copyErrorsButton)
 
@@ -3091,7 +3435,7 @@
                     e.stopPropagation()
 
                     const text = Array.from(errorContainerEl.querySelectorAll('div')).map(s => s.textContent).join('\n')
-                    navigator.clipboard.writeText(text)
+                    copyToClipboard(text)
 
                     toggleLogsPopup()
                 })
@@ -3181,7 +3525,7 @@
             }
             copyLineButton.addEventListener('click', (e) => {
                 e.stopPropagation()
-                navigator.clipboard.writeText(latestLogEl.textContent)
+                copyToClipboard(latestLogEl.textContent)
             })
 
             const logLineBox = document.createElement('div')
@@ -4450,6 +4794,8 @@
         }
 
         initUI()
+
+        if (localStorage.getItem(REC_ON_KEY) === 'true') recStart(true)
 
         await startTelegramControl()
 
