@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-10-21_v.3.1
+// @version      2026-10-21_v.3.2
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-21_v.3.1'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-21_v.3.2'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -156,6 +156,7 @@
     const actionWaitForScreen = 22
     const actionInterruptIfColor = 24
     const actionInterruptIfNotColor = 25
+    const actionCustom = 30 // {run: async () => {...}} - for a step that has to look before it acts
 
 
     // ======== screens (control pixels used to detect game state) ==========
@@ -3762,6 +3763,11 @@
                         }
                         return
                     }
+                } else if (actionType == actionCustom) {
+                    await action.run()
+                    if (isRunningMacro != macro) return
+                    // whatever it clicked, repeating it blindly on a failed wait later could do harm
+                    prevClickAction = null
                 } else if (actionType == actionJump) {
                     const { jumpTitle = title } = action
                     skipUntilAction = jumpTitle
@@ -4505,7 +4511,45 @@
             const waitForReorderTeams = {pixels: screenReorderTeams, actionType: actionWaitForScreen, delay: 2000, title: "Waiting for reorder teams"}
             const clickCloseReorderTeams = {x: 0.971644, y: 0.052598, actionType: actionClick, delay: 300, title: "Close reorder teams"}
 
-            const battleLoop = [waitForBattlePreparation, delay(500), clickAutoBattle, waitForLose, delay(500), clickContinue, waitForFrontier, delay(500), clickToBattle]
+            // The defeat screen differs between client builds. Up to 1.291 its green button (bottom right)
+            // goes back to the frontier. From 1.292 it is "Повторить" and starts a rematch on the spot,
+            // and the way back is the close button top right - so the macro got rematch after rematch and
+            // never reached the team reordering. Measured with the recorder on both builds: 1.291 is back
+            // on the frontier two seconds after the green button; 1.292 is in a new battle instead, and its
+            // close button returns to the frontier in a second. Learn which build this is on the first
+            // defeat of the page and use the right exit from then on.
+            const clickCloseDefeat = {x: 0.971644, y: 0.052598, actionType: actionClick, delay: 300, title: "Close defeat screen"}
+            const DEFEAT_EXIT_PROBE_MS = 5000
+            let defeatExit = null // 'continue' | 'close'
+
+            async function leaveDefeatScreen() {
+                if (defeatExit === 'close') {
+                    await runActions([clickCloseDefeat], MACRO_FRONTIER, 0)
+                    return
+                }
+
+                await runActions([clickContinue], MACRO_FRONTIER, 0)
+                if (defeatExit === 'continue') return
+
+                const deadline = Date.now() + DEFEAT_EXIT_PROBE_MS
+                while (Date.now() < deadline && isRunningMacro == MACRO_FRONTIER) {
+                    await sleep(300, MACRO_FRONTIER)
+                    if (await screenMatches(screenFrontier)) {
+                        defeatExit = 'continue'
+                        diagLog('frontier', 'экран поражения: зелёная кнопка возвращает на Frontier (клиент до 1.291) - дальше жмём её')
+                        return
+                    }
+                }
+                if (isRunningMacro != MACRO_FRONTIER) return
+
+                // no frontier: this build started a rematch. Let it play out, then leave by the close button.
+                defeatExit = 'close'
+                diagLog('frontier', 'экран поражения: зелёная кнопка начала переигровку (клиент 1.292+) - дальше выходим крестиком')
+                await runActions([waitForLose, delay(500), clickCloseDefeat], MACRO_FRONTIER)
+            }
+            const leaveDefeat = {actionType: actionCustom, run: leaveDefeatScreen, title: "Leaving defeat screen"}
+
+            const battleLoop = [waitForBattlePreparation, delay(500), clickAutoBattle, waitForLose, delay(500), leaveDefeat, waitForFrontier, delay(500), clickToBattle]
             const clickFrontierTitle = "Click frontier"
             if (fromHomePage) {
                 fromHomePage = false
