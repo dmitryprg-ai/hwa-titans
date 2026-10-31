@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-10-21_v.3.2
+// @version      2026-10-31_v.3.3
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-21_v.3.2'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-31_v.3.3'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -1099,6 +1099,7 @@
         }
 
         async function sleep(ms, macro = null) {
+            if (reloadInFlight) await new Promise(() => {}) // see runActions: a reload is on its way
             const time = Math.round(ms * delayFactor)
             if (macro == null) {
                 return new Promise(r => setTimeout(r, time))
@@ -1476,7 +1477,10 @@
                 )
             }
 
-            diagLog('popup', 'домашний экран так и не появился за ' + Math.round(HOME_POPUP_WATCH_MS / 1000) + ' с, кликов: ' + clicks)
+            // a stopped macro ends the loop early - not worth reporting as a screen that never came
+            if (isRunningMacro == macro) {
+                diagLog('popup', 'домашний экран так и не появился за ' + Math.round(HOME_POPUP_WATCH_MS / 1000) + ' с, кликов: ' + clicks)
+            }
             return false
         }
 
@@ -3625,6 +3629,11 @@
             // a failed wait re-ran itself with a fresh retry count, forever, and never reached the reload.
             let prevClickAction = null
             for (const action of actions) {
+                // A requested reload is seconds away, and anything clicked meanwhile lands on a game about
+                // to be thrown away. Measured: right after asking for one the macro went on into a battle
+                // (Fast pass, mid room, waiting for battlefield). Park until the page goes.
+                if (reloadInFlight) await new Promise(() => {})
+
                 if (isRunningMacro != macro) return
 
                 if (skipActions > 0) {
@@ -3764,10 +3773,11 @@
                         return
                     }
                 } else if (actionType == actionCustom) {
-                    await action.run()
+                    const clicked = await action.run()
                     if (isRunningMacro != macro) return
-                    // whatever it clicked, repeating it blindly on a failed wait later could do harm
-                    prevClickAction = null
+                    // only what the step itself names as safe to repeat - repeating some other click of
+                    // its blindly on a failed wait later could do harm
+                    prevClickAction = clicked && clicked.actionType == actionClick ? clicked : null
                 } else if (actionType == actionJump) {
                     const { jumpTitle = title } = action
                     skipUntilAction = jumpTitle
@@ -4211,14 +4221,54 @@
             // ======= dungeon elemental rooms =======
             const roomSelectionTitle = "Waiting for room selection popup"
 
-            const waitFor1RoomSelection = {pixels: popupOneRoomSelection, actionType: actionWaitForScreen, threshold: 20, delay: DELAY_CHECK_CYCLE, title: roomSelectionTitle}
-            const waitFor2RoomSelection = {pixels: popupTwoRoomsSelection, actionType: actionWaitForScreen, threshold: 20, delay: DELAY_CHECK_CYCLE, title: roomSelectionTitle}
             const roomMid = {x: 0.5, y: 0.795, delay: DELAY_AFTER_ROOM_CLICKED, actionType: actionClick, title: "Clicking on mid room"}
 
             //  ======= usage: checkRoomColors, roomLeft, roomRight =======
             const checkRoomColors = {x: 0.31496881496881496, y: 0.6560364464692483, altX: 0.6891891891891891, delay: DELAY_CHECK_CYCLE, actionType: actionChooseRoom, title: "Choosing a correct room"}
             const roomLeft = {x: 0.3076, y: 0.8, delay: DELAY_AFTER_ROOM_CLICKED, actionType: actionClick, title: "Clicking on left room"}
             const roomRight = {x: 0.6833, y: 0.8, delay: DELAY_AFTER_ROOM_CLICKED, actionType: actionClick, title: "Clicking on right room"}
+
+            // Which popup a gate opens is not fixed: a level the floor plan below has down for two
+            // elemental rooms sometimes offers one. Measured: after a "levels 2 to 4" fight the macro
+            // waited for two rooms while the game showed one - a green button in the middle, nothing
+            // where the left room would be - and the wait ran out into a reload; on the next pass the
+            // very same popup matched the one-room wait at once. The left/right clicks of the two-room
+            // choice also miss the single room's button entirely. So wait for either popup and act on
+            // the one actually there; the gate is re-clicked on a timeout, as the old wait did.
+            function chooseRoom(gateClick, levelName) {
+                return {actionType: actionCustom, title: roomSelectionTitle, run: async () => {
+                    lvlTitle = levelName
+                    let retries = MAX_RETRIES
+                    let deadline = Date.now() + DELAY_CHECK_CYCLE
+                    while (isRunningMacro == MACRO_DUNGEON) {
+                        if (await screenMatches(popupTwoRoomsSelection, 20)) {
+                            await runActions([checkRoomColors, roomLeft, roomRight], MACRO_DUNGEON)
+                            return roomRight
+                        }
+                        if (await screenMatches(popupOneRoomSelection, 20)) {
+                            await runActions([roomMid], MACRO_DUNGEON)
+                            return roomMid
+                        }
+                        if (Date.now() >= deadline) {
+                            if (retries > 0) {
+                                addError("re-clicking (retries:" + retries + ") " + roomSelectionTitle)
+                                retries--
+                                deadline = Date.now() + MAX_WAIT_BEFORE_RETRY
+                                await runActions([gateClick], MACRO_DUNGEON, 0)
+                                continue
+                            }
+                            addError("skipped waiting " + levelName + ": " + roomSelectionTitle)
+                            diagLog('screen', 'не дождались попапа комнат на ' + levelName +
+                                ': две комнаты -> ' + await describeScreen(popupTwoRoomsSelection, 20) +
+                                '; одна комната -> ' + await describeScreen(popupOneRoomSelection, 20), false)
+                            reloadPage('превышено число попыток: ' + levelName + ' / ' + roomSelectionTitle, 'wrong_screen')
+                            return null
+                        }
+                        await sleep(100, MACRO_DUNGEON)
+                    }
+                    return null
+                }}
+            }
             // ======= dungeon battlefield screen =======
 
             const waitForBattlefield = {pixels: screenBattlefield, delay: DELAY_CHECK_CYCLE, actionType: actionWaitForScreen, title: "Waiting for battlefield scene"}
@@ -4335,6 +4385,9 @@
                     {actionType: actionJumpIfScreen, pixels: screenLvl789, title: "Checking if we're on " + lvl789, jumpTitle: lvl789, skipLog: skipLogs},
                     delay(1000)
                 ], MACRO_DUNGEON, 0)
+                // stopped meanwhile: every runActions now returns at once, and the dump and the popup
+                // check below would run out the attempts in a second and log clicks that never happen
+                if (isRunningMacro != MACRO_DUNGEON) break
 
                 // near the end of the budget only: on the first miss this fires during ordinary
                 // screen transitions (measured - the dump itself then matched 7/7), and having
@@ -4420,17 +4473,17 @@
             for (let i = 0; i < floors; i++) {
                 if (isRunningMacro != MACRO_DUNGEON) break
                 await runActions([
-                    ...fastRightGateActions, title(lvl(1)), waitForLvl1, gateRight, waitFor1RoomSelection, title(lvl(1)), roomMid, ...battleActions,
-                    ...fastRightGateActions, title(lvl(2)), waitForLvl234, gateMid, waitFor2RoomSelection, title(lvl(2)), checkRoomColors, roomLeft, roomRight, ...battleActions,
-                    ...fastRightGateActions, title(lvl(3)), waitForLvl234, gateMid, waitFor2RoomSelection, title(lvl(3)), checkRoomColors, roomLeft, roomRight, ...battleActions,
-                    ...fastRightGateActions, title(lvl(4)), waitForLvl234, gateMid, waitFor1RoomSelection, title(lvl(4)), roomMid, ...battleActions,
-                    ...fastRightGateActions, title(lvl(5)), waitForLvl5, gateLeft, waitFor2RoomSelection, title(lvl(5)), checkRoomColors, roomLeft, roomRight, ...battleActions,
+                    ...fastRightGateActions, title(lvl(1)), waitForLvl1, gateRight, chooseRoom(gateRight, lvl(1)), title(lvl(1)), ...battleActions,
+                    ...fastRightGateActions, title(lvl(2)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(2)), title(lvl(2)), ...battleActions,
+                    ...fastRightGateActions, title(lvl(3)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(3)), title(lvl(3)), ...battleActions,
+                    ...fastRightGateActions, title(lvl(4)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(4)), title(lvl(4)), ...battleActions,
+                    ...fastRightGateActions, title(lvl(5)), waitForLvl5, gateLeft, chooseRoom(gateLeft, lvl(5)), title(lvl(5)), ...battleActions,
                     title(floor1), waitForFloor1Done, floor1Done, waitForFloorConfirm, floorConfirm,
-                    ...fastLeftGateActions, title(lvl(6)), waitForLvl6, gateLeft, waitFor1RoomSelection, title(lvl(6)), roomMid, ...battleActions,
-                    ...fastLeftGateActions, title(lvl(7)), waitForLvl789, gateMid, waitFor2RoomSelection, title(lvl(7)), checkRoomColors, roomLeft, roomRight, ...battleActions,
-                    ...fastLeftGateActions, title(lvl(8)), waitForLvl789, gateMid, waitFor2RoomSelection, title(lvl(8)), checkRoomColors, roomLeft, roomRight, ...battleActions,
-                    ...fastLeftGateActions, title(lvl(9)), waitForLvl789, gateMid, waitFor1RoomSelection, title(lvl(9)), roomMid, ...battleActions,
-                    ...fastLeftGateActions, title(lvl(0)), waitForLvl0, gateRight, waitFor2RoomSelection, title(lvl(0)), checkRoomColors, roomLeft, roomRight, ...battleActions,
+                    ...fastLeftGateActions, title(lvl(6)), waitForLvl6, gateLeft, chooseRoom(gateLeft, lvl(6)), title(lvl(6)), ...battleActions,
+                    ...fastLeftGateActions, title(lvl(7)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(7)), title(lvl(7)), ...battleActions,
+                    ...fastLeftGateActions, title(lvl(8)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(8)), title(lvl(8)), ...battleActions,
+                    ...fastLeftGateActions, title(lvl(9)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(9)), title(lvl(9)), ...battleActions,
+                    ...fastLeftGateActions, title(lvl(0)), waitForLvl0, gateRight, chooseRoom(gateRight, lvl(0)), title(lvl(0)), ...battleActions,
                     title(floor2), waitForFloor2Done, floor2Done, waitForFloorConfirm, floorConfirm,
                 ], MACRO_DUNGEON)
 
