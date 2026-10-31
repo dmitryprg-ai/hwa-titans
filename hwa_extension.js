@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-10-31_v.3.4
+// @version      2026-10-31_v.3.5
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-31_v.3.4'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-31_v.3.5'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -4306,22 +4306,29 @@
 
             // ======= speed up titan walk =========
             const fastRightGateTitle = "Fast right gate"
-            let fastRightGateActions = [
-                {x: 0.995370, y: 0.389100, actionType: actionClick, title: "Fast pass", delay: 100}
-            ]
-            for (let i=0; i<10; i++) {
-                fastRightGateActions.push({pixels: popupOneRoomSelection, actionType: actionJumpIfScreen, threshold: 20, title: fastRightGateTitle, jumpTitle: roomSelectionTitle, skipLog: true})
-                fastRightGateActions.push({pixels: popupTwoRoomsSelection, actionType: actionJumpIfScreen, threshold: 20, title: fastRightGateTitle, jumpTitle: roomSelectionTitle, skipLog: true})
-                fastRightGateActions.push({x: 0.995370, y: 0.389100, actionType: actionClick, title: "Fast pass", delay: 100, skipLog: true})
-            }
-
             const fastLeftGateTitle = "Fast left gate"
-            let fastLeftGateActions = [{x: 0.005370, y: 0.389100, actionType: actionClick, title: "Fast pass", delay: 100}]
-            for (let i=0; i<10; i++) {
-                fastLeftGateActions.push({pixels: popupOneRoomSelection, actionType: actionJumpIfScreen, threshold: 20, title: fastLeftGateTitle, jumpTitle: roomSelectionTitle, skipLog: true})
-                fastLeftGateActions.push({pixels: popupTwoRoomsSelection, actionType: actionJumpIfScreen, threshold: 20, title: fastLeftGateTitle, jumpTitle: roomSelectionTitle, skipLog: true})
-                fastLeftGateActions.push({x: 0.005370, y: 0.389100, actionType: actionClick, title: "Fast pass", delay: 100, skipLog: true})
+            // Usually the room popup opens on the way; when it does not, the titans stop in front of the
+            // gates and wait for one to be clicked. The level's own scene then ends the clicking at once -
+            // it used to run out all ten clicks first. Measured: the scene was up 2-5 clicks before the
+            // last one, about a second lost on every such level. Not on the first three clicks: levels
+            // 2-4 and 7-9 share a scene, so the one just cleared would also match, and a gate clicked
+            // there is lost. Measured: a second after the confirm click the old scene was never seen,
+            // and the new one came two seconds or later.
+            function fastPass(x, checkTitle, levelPixels, levelName) {
+                const actions = [{x, y: 0.389100, actionType: actionClick, title: "Fast pass", delay: 100}]
+                for (let i=0; i<10; i++) {
+                    actions.push({pixels: popupOneRoomSelection, actionType: actionJumpIfScreen, threshold: 20, title: checkTitle, jumpTitle: roomSelectionTitle, skipLog: true})
+                    actions.push({pixels: popupTwoRoomsSelection, actionType: actionJumpIfScreen, threshold: 20, title: checkTitle, jumpTitle: roomSelectionTitle, skipLog: true})
+                    if (i >= 3) {
+                        // to the level's title, right after this block: its wait passes at once, then the gate
+                        actions.push({pixels: levelPixels, actionType: actionJumpIfScreen, threshold: 15, title: checkTitle, jumpTitle: levelName, skipLog: true})
+                    }
+                    actions.push({x, y: 0.389100, actionType: actionClick, title: "Fast pass", delay: 100, skipLog: true})
+                }
+                return actions
             }
+            const fastRight = (levelPixels, levelName) => fastPass(0.995370, fastRightGateTitle, levelPixels, levelName)
+            const fastLeft = (levelPixels, levelName) => fastPass(0.005370, fastLeftGateTitle, levelPixels, levelName)
 
             if (fromHomePage) {
                 fromHomePage = false
@@ -4484,17 +4491,17 @@
             for (let i = 0; i < floors; i++) {
                 if (isRunningMacro != MACRO_DUNGEON) break
                 await runActions([
-                    ...fastRightGateActions, title(lvl(1)), waitForLvl1, gateRight, chooseRoom(gateRight, lvl(1)), title(lvl(1)), ...battleActions,
-                    ...fastRightGateActions, title(lvl(2)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(2)), title(lvl(2)), ...battleActions,
-                    ...fastRightGateActions, title(lvl(3)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(3)), title(lvl(3)), ...battleActions,
-                    ...fastRightGateActions, title(lvl(4)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(4)), title(lvl(4)), ...battleActions,
-                    ...fastRightGateActions, title(lvl(5)), waitForLvl5, gateLeft, chooseRoom(gateLeft, lvl(5)), title(lvl(5)), ...battleActions,
+                    ...fastRight(screenLvl1, lvl(1)), title(lvl(1)), waitForLvl1, gateRight, chooseRoom(gateRight, lvl(1)), title(lvl(1)), ...battleActions,
+                    ...fastRight(screenLvl234, lvl(2)), title(lvl(2)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(2)), title(lvl(2)), ...battleActions,
+                    ...fastRight(screenLvl234, lvl(3)), title(lvl(3)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(3)), title(lvl(3)), ...battleActions,
+                    ...fastRight(screenLvl234, lvl(4)), title(lvl(4)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(4)), title(lvl(4)), ...battleActions,
+                    ...fastRight(screenLvl5, lvl(5)), title(lvl(5)), waitForLvl5, gateLeft, chooseRoom(gateLeft, lvl(5)), title(lvl(5)), ...battleActions,
                     title(floor1), waitForFloor1Done, floor1Done, waitForFloorConfirm, floorConfirm,
-                    ...fastLeftGateActions, title(lvl(6)), waitForLvl6, gateLeft, chooseRoom(gateLeft, lvl(6)), title(lvl(6)), ...battleActions,
-                    ...fastLeftGateActions, title(lvl(7)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(7)), title(lvl(7)), ...battleActions,
-                    ...fastLeftGateActions, title(lvl(8)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(8)), title(lvl(8)), ...battleActions,
-                    ...fastLeftGateActions, title(lvl(9)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(9)), title(lvl(9)), ...battleActions,
-                    ...fastLeftGateActions, title(lvl(0)), waitForLvl0, gateRight, chooseRoom(gateRight, lvl(0)), title(lvl(0)), ...battleActions,
+                    ...fastLeft(screenLvl6, lvl(6)), title(lvl(6)), waitForLvl6, gateLeft, chooseRoom(gateLeft, lvl(6)), title(lvl(6)), ...battleActions,
+                    ...fastLeft(screenLvl789, lvl(7)), title(lvl(7)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(7)), title(lvl(7)), ...battleActions,
+                    ...fastLeft(screenLvl789, lvl(8)), title(lvl(8)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(8)), title(lvl(8)), ...battleActions,
+                    ...fastLeft(screenLvl789, lvl(9)), title(lvl(9)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(9)), title(lvl(9)), ...battleActions,
+                    ...fastLeft(screenLvl0, lvl(0)), title(lvl(0)), waitForLvl0, gateRight, chooseRoom(gateRight, lvl(0)), title(lvl(0)), ...battleActions,
                     title(floor2), waitForFloor2Done, floor2Done, waitForFloorConfirm, floorConfirm,
                 ], MACRO_DUNGEON)
 
