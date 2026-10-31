@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-10-31_v.3.3
+// @version      2026-10-31_v.3.4
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-31_v.3.3'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-31_v.3.4'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -3788,7 +3788,8 @@
                     if (pixels.every((p, i) => colorsAreSame(testPixels[i], p.color, p.threshold ?? threshold))) {
                         skipUntilAction = jumpTitle
                     } else {
-                        if (title == "Check if there are 5 titans") {
+                        // a 4-titan team is normal; this is debug output, so only with "Log all actions" on
+                        if (LOG_ACTIONS && title == "Check if there are 5 titans") {
                             addError("not 5 titans? " + pixels.map((p, i) => "[" + testPixels[i] + "] == [" + p.color + "]").join(", "))
                         }
                     }
@@ -3798,7 +3799,8 @@
                     if (!pixels.every((p, i) => colorsAreSame(testPixels[i], p.color, p.threshold ?? threshold))) {
                         skipUntilAction = jumpTitle
                     } else {
-                        if (title == "Check if there are 5 titans") {
+                        // a 4-titan team is normal; this is debug output, so only with "Log all actions" on
+                        if (LOG_ACTIONS && title == "Check if there are 5 titans") {
                             addError("not 5 titans? " + pixels.map((p, i) => "[" + testPixels[i] + "] == [" + p.color + "]").join(", "))
                         }
                     }
@@ -4240,21 +4242,31 @@
                     lvlTitle = levelName
                     let retries = MAX_RETRIES
                     let deadline = Date.now() + DELAY_CHECK_CYCLE
+                    // Act only on a popup that has settled - the same kind on two checks in a row, at the
+                    // old wait's pace of one check per 100ms. The first version of this step acted on the
+                    // very first matching frame, while the rooms were still sliding in: the click missed,
+                    // and the battlefield wait then sat out its ten seconds before clicking the room again.
+                    let lastSeen = null
                     while (isRunningMacro == MACRO_DUNGEON) {
-                        if (await screenMatches(popupTwoRoomsSelection, 20)) {
-                            await runActions([checkRoomColors, roomLeft, roomRight], MACRO_DUNGEON)
-                            return roomRight
-                        }
-                        if (await screenMatches(popupOneRoomSelection, 20)) {
+                        await sleep(100, MACRO_DUNGEON)
+                        const seen = await screenMatches(popupTwoRoomsSelection, 20) ? 'two'
+                            : await screenMatches(popupOneRoomSelection, 20) ? 'one' : null
+                        if (seen && seen === lastSeen) {
+                            if (seen === 'two') {
+                                await runActions([checkRoomColors, roomLeft, roomRight], MACRO_DUNGEON)
+                                return roomRight
+                            }
                             await runActions([roomMid], MACRO_DUNGEON)
                             return roomMid
                         }
+                        lastSeen = seen
                         if (Date.now() >= deadline) {
                             if (retries > 0) {
                                 addError("re-clicking (retries:" + retries + ") " + roomSelectionTitle)
                                 retries--
                                 deadline = Date.now() + MAX_WAIT_BEFORE_RETRY
                                 await runActions([gateClick], MACRO_DUNGEON, 0)
+                                lastSeen = null
                                 continue
                             }
                             addError("skipped waiting " + levelName + ": " + roomSelectionTitle)
@@ -4264,7 +4276,6 @@
                             reloadPage('превышено число попыток: ' + levelName + ' / ' + roomSelectionTitle, 'wrong_screen')
                             return null
                         }
-                        await sleep(100, MACRO_DUNGEON)
                     }
                     return null
                 }}
