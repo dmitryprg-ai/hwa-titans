@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-10-31_v.3.5
+// @version      2026-11-01_v.3.6
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-10-31_v.3.5'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-11-01_v.3.6'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -252,6 +252,16 @@
         {"x": 0.387636, "y": 0.403108, "color": [78,6,11]},
         {"x": 0.258145, "y": 0.264168, "color": [22,12,8]},
         {"x": 0.634921, "y": 0.567642, "color": [255,252,109]}
+    ]
+    // "ПОЗДРАВЛЯЕМ! Получены следующие предметы:" - the green "Получить" button and the panel around it
+    const popupReward = [
+        {"x": 0.451836, "y": 0.699651, "color": [77,171,30], "threshold": 30},
+        {"x": 0.550293, "y": 0.699651, "color": [78,169,29], "threshold": 30},
+        {"x": 0.451836, "y": 0.743888, "color": [61,159,23], "threshold": 30},
+        {"x": 0.550293, "y": 0.743888, "color": [60,157,22], "threshold": 30},
+        {"x": 0.308143, "y": 0.746217, "color": [87,48,161], "threshold": 20},
+        {"x": 0.265567, "y": 0.280559, "color": [81,73,206], "threshold": 20},
+        {"x": 0.733901, "y": 0.280559, "color": [183,71,73], "threshold": 20}
     ]
 
     // ============ Frontier ===========
@@ -1217,7 +1227,7 @@
         const REC_SCREENS = {
             screenHome, screenGuild, screenLvl1, screenLvl234, screenLvl789, screenLvl5, screenFloor1Final, screenLvl6,
             screenLvl0, screenFloor2Final, popupOneRoomSelection, popupTwoRoomsSelection, screenBattlefield, popupBattleResult,
-            popupBattleResult5Titans, popupFloorReward, screenFrontier, screenBattlePrep, screenLose, screenReorderTeams,
+            popupBattleResult5Titans, popupFloorReward, popupReward, screenFrontier, screenBattlePrep, screenLose, screenReorderTeams,
             screenExpeditionOpened, screenValkyrieGift, screenHydraNoMoreFairies, screenTowerChestAvailable, screenTowerRewardPopup,
             screenCampAttackButton, screenCampBattleTransition, screenCampPopupAttackButton, screenCampBattleEnd,
             screenCampSearchClosed, screenChestRewardPopup, screenFreeChestAvailable
@@ -1454,6 +1464,23 @@
         // differs by skin (measured gold on one, green on another, same coordinates). So do not
         // look at the colour at all - while the home screen is not up, just click the corner.
         const POPUP_CLOSE_POINT = {x: 0.971527, y: 0.050058}
+        // Except the reward window: it has no close corner at all, only its "Получить" button, so
+        // corner clicks left it up for good and the macro stalled on it. Measured on 1879x859.
+        const REWARD_BUTTON_POINT = {x: 0.501064, y: 0.721188}
+
+        async function claimRewardPopup(macro) {
+            if (!await screenMatches(popupReward)) return false
+            diagLog('popup', 'окно с наградой, жмём «Получить»')
+            await runActions(
+                [{
+                    x: REWARD_BUTTON_POINT.x, y: REWARD_BUTTON_POINT.y,
+                    actionType: actionClick, title: 'Claiming reward',
+                    delay: 1500, skipLog: true
+                }],
+                macro, 0
+            )
+            return true
+        }
 
         async function closeHomePopups(macro) {
             const started = Date.now()
@@ -1464,6 +1491,8 @@
                     if (clicks > 0) diagLog('popup', 'домашний экран свободен, кликов по крестику: ' + clicks)
                     return true
                 }
+
+                if (await claimRewardPopup(macro)) continue
 
                 clicks++
                 if (clicks === 1) diagLog('popup', 'домашний экран закрыт попапом, кликаем по крестику')
@@ -4387,6 +4416,7 @@
             let detectAttempts = 10
             let detectDumped = false
             let dungeonPopupClicks = 0
+            let dungeonRewardClicks = 0
             const detectCandidates = [
                 [lvl(1), screenLvl1], [lvl(0), screenLvl0], [lvl(5), screenLvl5], [lvl(6), screenLvl6],
                 [floor1, screenFloor1Final], [floor2, screenFloor2Final], [lvl234, screenLvl234], [lvl789, screenLvl789]
@@ -4406,6 +4436,14 @@
                 // stopped meanwhile: every runActions now returns at once, and the dump and the popup
                 // check below would run out the attempts in a second and log clicks that never happen
                 if (isRunningMacro != MACRO_DUNGEON) break
+
+                // the reward window is known by its own pixels, so unlike the unknown popups below it
+                // is claimed at once, and the round does not count against the attempts
+                if (skipUntilAction == null && dungeonRewardClicks < MAX_DUNGEON_POPUP_CLICKS && !document.hidden &&
+                    await claimRewardPopup(MACRO_DUNGEON)) {
+                    dungeonRewardClicks++
+                    continue
+                }
 
                 // near the end of the budget only: on the first miss this fires during ordinary
                 // screen transitions (measured - the dump itself then matched 7/7), and having
