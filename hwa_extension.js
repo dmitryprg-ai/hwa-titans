@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-11-01_v.3.6
+// @version      2026-11-25_v.3.7
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-11-01_v.3.6'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-11-25_v.3.7'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -4237,17 +4237,69 @@
             let checkIf5Titans = {pixels: popupBattleResult5Titans, actionType: actionJumpIfScreen, title: "Check if there are 5 titans", threshold: 20, jumpTitle: check5TitansHpTitle}
 
             // ======= dungeon gates =======
-            const waitForLvl0 = {pixels: screenLvl0, delay: DELAY_CHECK_CYCLE, actionType: actionWaitForScreen, title: "Waiting for right gate scene", threshold: 15}
-            const waitForLvl1 = {pixels: screenLvl1, delay: DELAY_CHECK_CYCLE, actionType: actionWaitForScreen, title: "Waiting for right gate scene", threshold: 15}
             const gateRight = {x: 0.691268, y: 0.5, delay: DELAY_AFTER_GATE_CLICKED, actionType: actionClick, title: "Clicking on right gate"}
-
-            const waitForLvl234 = {pixels: screenLvl234, delay: DELAY_CHECK_CYCLE, actionType: actionWaitForScreen, title: "Waiting for lvl2/3/4", threshold: 15}
-            const waitForLvl789 = {pixels: screenLvl789, delay: DELAY_CHECK_CYCLE, actionType: actionWaitForScreen, title: "Waiting for mid gate scene", threshold: 15}
             const gateMid = {x: 0.500, y: 0.5, delay: DELAY_AFTER_GATE_CLICKED, actionType: actionClick, title: "Clicking on mid gate"}
-
-            const waitForLvl5 = {pixels: screenLvl5, delay: DELAY_CHECK_CYCLE, actionType: actionWaitForScreen, title: "Waiting for lvl5", threshold: 15}
-            const waitForLvl6 = {pixels: screenLvl6, delay: DELAY_CHECK_CYCLE, actionType: actionWaitForScreen, title: "Waiting for lvl6", threshold: 15}
             const gateLeft = {x: 0.312, y: 0.5, delay: DELAY_AFTER_GATE_CLICKED, actionType: actionClick, title: "Clicking on left gate"}
+            const fastRightClick = {x: 0.995370, y: 0.389100, actionType: actionClick, title: "Fast pass", delay: 100}
+            const fastLeftClick = {x: 0.005370, y: 0.389100, actionType: actionClick, title: "Fast pass", delay: 100}
+
+            // Wait for the level's gate scene and click its gate, OR yield straight to chooseRoom if a
+            // room popup is already open. Measured: after Fast pass ended (or right after its early jump
+            // to the level), the game auto-opened the one- or two-room popup over the level scene; the old
+            // actionWaitForScreen only watched levelPixels, re-clicked the screen edge three times against
+            // the open popup, and reloaded on wrong_screen.
+            function openGate(levelPixels, gateClick, levelName, waitTitle, fastClick = null) {
+                return {actionType: actionCustom, title: waitTitle, run: async () => {
+                    lvlTitle = levelName
+                    let retries = MAX_RETRIES
+                    let deadline = Date.now() + DELAY_CHECK_CYCLE
+                    let hiddenReported = false
+                    while (isRunningMacro == MACRO_DUNGEON) {
+                        if (document.hidden) {
+                            if (!hiddenReported) {
+                                hiddenReported = true
+                                diagLog('hidden', 'вкладка скрыта на «' + waitTitle + '», ждём возврата без перезагрузки')
+                            }
+                            while (document.hidden && isRunningMacro == MACRO_DUNGEON) {
+                                await sleep(1000, MACRO_DUNGEON)
+                            }
+                            if (isRunningMacro != MACRO_DUNGEON) return null
+                            deadline = Date.now() + DELAY_CHECK_CYCLE
+                            continue
+                        }
+                        if (await screenMatches(popupTwoRoomsSelection, 20) || await screenMatches(popupOneRoomSelection, 20)) {
+                            return null
+                        }
+                        if (await screenMatches(levelPixels, 15)) {
+                            await runActions([gateClick], MACRO_DUNGEON, 0)
+                            return gateClick
+                        }
+                        if (Date.now() >= deadline) {
+                            const details = await describeScreen(levelPixels, 15)
+                            if (retries > 0) {
+                                addError((fastClick ? "re-clicking" : "waiting again") + " (retries:" + retries + ") " + waitTitle + " " + details)
+                                retries--
+                                deadline = Date.now() + MAX_WAIT_BEFORE_RETRY
+                                if (fastClick) await runActions([fastClick], MACRO_DUNGEON, 0)
+                                continue
+                            }
+                            addError("skipped waiting " + levelName + ": " + waitTitle + " " + details)
+                            diagLog('screen', 'пропустили ожидание: ' + levelName + ' / ' + waitTitle + ' ' + details, false)
+                            if (RELOAD_PAGE_ON_FAILURE) {
+                                reloadPage('превышено число попыток: ' + levelName + ' / ' + waitTitle, 'wrong_screen')
+                            } else {
+                                showMacroErrorPopup("Wrong screen " + levelName + ": " + waitTitle + " " + details)
+                                setActivated(dailyButton, false, BUTTON_TEXT_STOP_CUSTOM, BUTTON_TEXT_RUN_CUSTOM)
+                                isRunningMacro = null
+                                await releaseWakeLock()
+                            }
+                            return null
+                        }
+                        await sleep(100, MACRO_DUNGEON)
+                    }
+                    return null
+                }}
+            }
 
             // ======= dungeon elemental rooms =======
             const roomSelectionTitle = "Waiting for room selection popup"
@@ -4258,6 +4310,29 @@
             const checkRoomColors = {x: 0.31496881496881496, y: 0.6560364464692483, altX: 0.6891891891891891, delay: DELAY_CHECK_CYCLE, actionType: actionChooseRoom, title: "Choosing a correct room"}
             const roomLeft = {x: 0.3076, y: 0.8, delay: DELAY_AFTER_ROOM_CLICKED, actionType: actionClick, title: "Clicking on left room"}
             const roomRight = {x: 0.6833, y: 0.8, delay: DELAY_AFTER_ROOM_CLICKED, actionType: actionClick, title: "Clicking on right room"}
+
+            // Pick and click only the higher-priority room on a two-room popup, and hand back that exact
+            // click so a failed battlefield wait repeats the chosen room. The old sequence ran
+            // [checkRoomColors, roomLeft, roomRight] and always returned roomRight: when left won, it
+            // immediately clicked roomRight too (DELAY_AFTER_ROOM_CLICKED defaults to 0) and retried right.
+            async function clickPreferredRoom() {
+                const [leftPixel, rightPixel] = await readColorsAtCoords([
+                    [gameArea.width * checkRoomColors.x * canvasScaleX, gameArea.height * checkRoomColors.y * canvasScaleY],
+                    [gameArea.width * checkRoomColors.altX * canvasScaleX, gameArea.height * checkRoomColors.y * canvasScaleY],
+                ])
+                const leftCategory = getColorCategory(leftPixel)
+                const rightCategory = getColorCategory(rightPixel)
+                const priority = elementsOrder.map(x => x.id)
+                const chooseRight = priority.indexOf(rightCategory) <= priority.indexOf(leftCategory)
+                if (leftCategory != rightCategory) {
+                    window.setActiveElements(chooseRight ? [rightCategory, leftCategory] : [leftCategory, rightCategory])
+                } else {
+                    window.setActiveElements([])
+                }
+                const chosen = chooseRight ? roomRight : roomLeft
+                await runActions([chosen], MACRO_DUNGEON, 0)
+                return chosen
+            }
 
             // Which popup a gate opens is not fixed: a level the floor plan below has down for two
             // elemental rooms sometimes offers one. Measured: after a "levels 2 to 4" fight the macro
@@ -4271,6 +4346,7 @@
                     lvlTitle = levelName
                     let retries = MAX_RETRIES
                     let deadline = Date.now() + DELAY_CHECK_CYCLE
+                    let hiddenReported = false
                     // Act only on a popup that has settled - the same kind on two checks in a row, at the
                     // old wait's pace of one check per 100ms. The first version of this step acted on the
                     // very first matching frame, while the rooms were still sliding in: the click missed,
@@ -4278,14 +4354,27 @@
                     let lastSeen = null
                     while (isRunningMacro == MACRO_DUNGEON) {
                         await sleep(100, MACRO_DUNGEON)
+                        if (isRunningMacro != MACRO_DUNGEON) return null
+                        if (document.hidden) {
+                            if (!hiddenReported) {
+                                hiddenReported = true
+                                diagLog('hidden', 'вкладка скрыта на «' + roomSelectionTitle + '», ждём возврата без перезагрузки')
+                            }
+                            while (document.hidden && isRunningMacro == MACRO_DUNGEON) {
+                                await sleep(1000, MACRO_DUNGEON)
+                            }
+                            if (isRunningMacro != MACRO_DUNGEON) return null
+                            deadline = Date.now() + DELAY_CHECK_CYCLE
+                            lastSeen = null
+                            continue
+                        }
                         const seen = await screenMatches(popupTwoRoomsSelection, 20) ? 'two'
                             : await screenMatches(popupOneRoomSelection, 20) ? 'one' : null
                         if (seen && seen === lastSeen) {
                             if (seen === 'two') {
-                                await runActions([checkRoomColors, roomLeft, roomRight], MACRO_DUNGEON)
-                                return roomRight
+                                return await clickPreferredRoom()
                             }
-                            await runActions([roomMid], MACRO_DUNGEON)
+                            await runActions([roomMid], MACRO_DUNGEON, 0)
                             return roomMid
                         }
                         lastSeen = seen
@@ -4302,7 +4391,14 @@
                             diagLog('screen', 'не дождались попапа комнат на ' + levelName +
                                 ': две комнаты -> ' + await describeScreen(popupTwoRoomsSelection, 20) +
                                 '; одна комната -> ' + await describeScreen(popupOneRoomSelection, 20), false)
-                            reloadPage('превышено число попыток: ' + levelName + ' / ' + roomSelectionTitle, 'wrong_screen')
+                            if (RELOAD_PAGE_ON_FAILURE) {
+                                reloadPage('превышено число попыток: ' + levelName + ' / ' + roomSelectionTitle, 'wrong_screen')
+                            } else {
+                                showMacroErrorPopup("Wrong screen " + levelName + ": " + roomSelectionTitle)
+                                setActivated(dailyButton, false, BUTTON_TEXT_STOP_CUSTOM, BUTTON_TEXT_RUN_CUSTOM)
+                                isRunningMacro = null
+                                await releaseWakeLock()
+                            }
                             return null
                         }
                     }
@@ -4404,7 +4500,6 @@
             ]
 
             // ======== screen detection for the first floor =========
-            const initialFloorRooms = [checkRoomColors, roomLeft, roomRight, roomMid]
 
             function lvl(index) { return `Dungeon level ${index}` }
             const floor1 = "Dungeon floor1 (level 5 -> 6)"
@@ -4508,20 +4603,20 @@
 
             if (skipUntilAction == lvl234) {
                 await runActions([
-                    title(lvl234), gateMid, delay(EXTRA_GATE_DELAY_FIRST_FLOOR), ...initialFloorRooms, ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl234), openGate(screenLvl234, gateMid, lvl234, "Waiting for lvl2/3/4", fastRightClick), chooseRoom(gateMid, lvl234), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     jumpIfLvl234, jumpIfLvl5,
-                    title(lvl234), gateMid, delay(EXTRA_GATE_DELAY_FIRST_FLOOR), ...initialFloorRooms, ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl234), openGate(screenLvl234, gateMid, lvl234, "Waiting for lvl2/3/4", fastRightClick), chooseRoom(gateMid, lvl234), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     jumpIfLvl234, jumpIfLvl5,
-                    title(lvl234), gateMid, delay(EXTRA_GATE_DELAY_FIRST_FLOOR), ...initialFloorRooms, ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl234), openGate(screenLvl234, gateMid, lvl234, "Waiting for lvl2/3/4", fastRightClick), chooseRoom(gateMid, lvl234), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     {actionType: actionJump, jumpTitle: lvl(5)}
                 ], MACRO_DUNGEON)
             } else if (skipUntilAction == lvl789) {
                 await runActions([
-                    title(lvl789), gateMid, delay(EXTRA_GATE_DELAY_FIRST_FLOOR), ...initialFloorRooms, ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl789), openGate(screenLvl789, gateMid, lvl789, "Waiting for mid gate scene", fastLeftClick), chooseRoom(gateMid, lvl789), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     jumpIfLvl789, jumpIfLvl0,
-                    title(lvl789), gateMid, delay(EXTRA_GATE_DELAY_FIRST_FLOOR), ...initialFloorRooms, ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl789), openGate(screenLvl789, gateMid, lvl789, "Waiting for mid gate scene", fastLeftClick), chooseRoom(gateMid, lvl789), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     jumpIfLvl789, jumpIfLvl0,
-                    title(lvl789), gateMid, delay(EXTRA_GATE_DELAY_FIRST_FLOOR), ...initialFloorRooms, ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl789), openGate(screenLvl789, gateMid, lvl789, "Waiting for mid gate scene", fastLeftClick), chooseRoom(gateMid, lvl789), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     {actionType: actionJump, jumpTitle: lvl(0)}
                 ], MACRO_DUNGEON)
             }
@@ -4529,17 +4624,17 @@
             for (let i = 0; i < floors; i++) {
                 if (isRunningMacro != MACRO_DUNGEON) break
                 await runActions([
-                    ...fastRight(screenLvl1, lvl(1)), title(lvl(1)), waitForLvl1, gateRight, chooseRoom(gateRight, lvl(1)), title(lvl(1)), ...battleActions,
-                    ...fastRight(screenLvl234, lvl(2)), title(lvl(2)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(2)), title(lvl(2)), ...battleActions,
-                    ...fastRight(screenLvl234, lvl(3)), title(lvl(3)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(3)), title(lvl(3)), ...battleActions,
-                    ...fastRight(screenLvl234, lvl(4)), title(lvl(4)), waitForLvl234, gateMid, chooseRoom(gateMid, lvl(4)), title(lvl(4)), ...battleActions,
-                    ...fastRight(screenLvl5, lvl(5)), title(lvl(5)), waitForLvl5, gateLeft, chooseRoom(gateLeft, lvl(5)), title(lvl(5)), ...battleActions,
+                    ...fastRight(screenLvl1, lvl(1)), title(lvl(1)), openGate(screenLvl1, gateRight, lvl(1), "Waiting for right gate scene", fastRightClick), chooseRoom(gateRight, lvl(1)), title(lvl(1)), ...battleActions,
+                    ...fastRight(screenLvl234, lvl(2)), title(lvl(2)), openGate(screenLvl234, gateMid, lvl(2), "Waiting for lvl2/3/4", fastRightClick), chooseRoom(gateMid, lvl(2)), title(lvl(2)), ...battleActions,
+                    ...fastRight(screenLvl234, lvl(3)), title(lvl(3)), openGate(screenLvl234, gateMid, lvl(3), "Waiting for lvl2/3/4", fastRightClick), chooseRoom(gateMid, lvl(3)), title(lvl(3)), ...battleActions,
+                    ...fastRight(screenLvl234, lvl(4)), title(lvl(4)), openGate(screenLvl234, gateMid, lvl(4), "Waiting for lvl2/3/4", fastRightClick), chooseRoom(gateMid, lvl(4)), title(lvl(4)), ...battleActions,
+                    ...fastRight(screenLvl5, lvl(5)), title(lvl(5)), openGate(screenLvl5, gateLeft, lvl(5), "Waiting for lvl5", fastRightClick), chooseRoom(gateLeft, lvl(5)), title(lvl(5)), ...battleActions,
                     title(floor1), waitForFloor1Done, floor1Done, waitForFloorConfirm, floorConfirm,
-                    ...fastLeft(screenLvl6, lvl(6)), title(lvl(6)), waitForLvl6, gateLeft, chooseRoom(gateLeft, lvl(6)), title(lvl(6)), ...battleActions,
-                    ...fastLeft(screenLvl789, lvl(7)), title(lvl(7)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(7)), title(lvl(7)), ...battleActions,
-                    ...fastLeft(screenLvl789, lvl(8)), title(lvl(8)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(8)), title(lvl(8)), ...battleActions,
-                    ...fastLeft(screenLvl789, lvl(9)), title(lvl(9)), waitForLvl789, gateMid, chooseRoom(gateMid, lvl(9)), title(lvl(9)), ...battleActions,
-                    ...fastLeft(screenLvl0, lvl(0)), title(lvl(0)), waitForLvl0, gateRight, chooseRoom(gateRight, lvl(0)), title(lvl(0)), ...battleActions,
+                    ...fastLeft(screenLvl6, lvl(6)), title(lvl(6)), openGate(screenLvl6, gateLeft, lvl(6), "Waiting for lvl6", fastLeftClick), chooseRoom(gateLeft, lvl(6)), title(lvl(6)), ...battleActions,
+                    ...fastLeft(screenLvl789, lvl(7)), title(lvl(7)), openGate(screenLvl789, gateMid, lvl(7), "Waiting for mid gate scene", fastLeftClick), chooseRoom(gateMid, lvl(7)), title(lvl(7)), ...battleActions,
+                    ...fastLeft(screenLvl789, lvl(8)), title(lvl(8)), openGate(screenLvl789, gateMid, lvl(8), "Waiting for mid gate scene", fastLeftClick), chooseRoom(gateMid, lvl(8)), title(lvl(8)), ...battleActions,
+                    ...fastLeft(screenLvl789, lvl(9)), title(lvl(9)), openGate(screenLvl789, gateMid, lvl(9), "Waiting for mid gate scene", fastLeftClick), chooseRoom(gateMid, lvl(9)), title(lvl(9)), ...battleActions,
+                    ...fastLeft(screenLvl0, lvl(0)), title(lvl(0)), openGate(screenLvl0, gateRight, lvl(0), "Waiting for right gate scene", fastLeftClick), chooseRoom(gateRight, lvl(0)), title(lvl(0)), ...battleActions,
                     title(floor2), waitForFloor2Done, floor2Done, waitForFloorConfirm, floorConfirm,
                 ], MACRO_DUNGEON)
 
