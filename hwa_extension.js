@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-11-25_v.3.8
+// @version      2026-11-25_v.3.9
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-11-25_v.3.8'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-11-25_v.3.9'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -222,7 +222,9 @@
         {"x": 0.714699, "y": 0.098226, "color": [241,192,102]},
         {"x": 0.495396, "y": 0.106855, "color": [97,49,0]},
         {"x": 0.558011, "y": 0.633065, "color": [176,207,248]},
-        {"x": 0.494475, "y": 0.891129, "color": [20,16,4]}
+        // Measured on level 9 (22:19:20): a slightly taller one-room popup puts the brownish-gold
+        // bottom rim [58,37,8] at (0.494,0.891) instead of dark interior [20,16,4] (d38 > 20).
+        {"x": 0.494475, "y": 0.891129, "color": [20,16,4], "threshold": 45}
     ]
     const popupTwoRoomsSelection = [
         {"x": 0.876509, "y": 0.099593, "color": [241,196,107]},
@@ -759,7 +761,10 @@
     const JS_HEAP_CHECK_EVERY = 8
     const MEMORY_WARN_MARGIN = 0.15
     const MEMORY_RELOAD_RATIO = Number(localStorage.getItem('MEMORY_RELOAD_RATIO') || 0.85)
-    const WASM_RELOAD_RATIO = Number(localStorage.getItem('WASM_RELOAD_RATIO') || 0.93)
+    // Measured: wasm heap jumps in 440-537MB chunks (85%->98%, 88%->99%, 86%->99%), so 0.93 left
+    // only ~287MB before the 4096MB wasm32 ceiling and let a single spike crash the tab. 0.85 leaves
+    // ~615MB of headroom for a clean preventive reload.
+    const WASM_RELOAD_RATIO = Number(localStorage.getItem('WASM_RELOAD_RATIO') || 0.85)
 
     if (MEMORY_RELOAD_RATIO > 0 || WASM_RELOAD_RATIO > 0) {
         let jsHeapWarned = false
