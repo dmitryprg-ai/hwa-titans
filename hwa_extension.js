@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-11-25_v.3.9
+// @version      2026-11-25_v.3.9.1
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-11-25_v.3.9'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-11-25_v.3.9.1'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -587,12 +587,12 @@
     }
 
     // counts reloads (total + per-reason) towards the results popup, notifies Telegram
-    // (awaited BEFORE location.reload(), otherwise navigation can cut off the request), then reloads the page.
-    // reloadInFlight guards against duplicate triggers piling up while the notify is in flight
-    // (e.g. checkError()'s 1s poll seeing the same still-present error-card again) - only the
-    // first call counts the reload and sends the notify.
+    // reloadPage() records the reload reason, flushes logs, and reloads immediately.
+    // Do not await Telegram here: when the local bridge is not running, a refused localhost fetch
+    // stalls ~2s on Windows while Unity keeps allocating wasm memory toward the 4GB ceiling.
+    // reloadInFlight guards against duplicate triggers firing before navigation tears down the page.
     let reloadInFlight = false
-    async function reloadPage(reason = 'unknown', category = 'other') {
+    function reloadPage(reason = 'unknown', category = 'other') {
         if (reloadInFlight) {
             return
         }
@@ -608,7 +608,6 @@
         diagLog('RELOAD/' + category, reason + ' | ' + describeWasmHeap())
 
         persistLogsNow()
-        await sendTelegramNotify(`🔄 Страница перезагружается (${reason})\nВремя: ${formatNowForTelegram()}`)
         location.reload()
     }
 
