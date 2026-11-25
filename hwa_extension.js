@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Dungeon of the Titans
 // @namespace    http://tampermonkey.net/
-// @version      2026-11-25_v.3.7
+// @version      2026-11-25_v.3.8
 // @description  try to take over the world!
 // @author       You
 // @match        https://www.hero-wars-alliance.com/*
@@ -34,7 +34,7 @@
     const MACRO_RELOAD_REASONS_KEY = 'macroReloadReasons'
 
     // keep in sync with the @version header above; GM_info is used when the manager exposes it
-    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-11-25_v.3.7'
+    const SCRIPT_VERSION = (typeof GM_info !== 'undefined' && GM_info.script && GM_info.script.version) || '2026-11-25_v.3.8'
 
     // Diagnostic log: only what is worth reporting - errors and reloads - kept across reloads.
     // The on-screen action log holds 20 lines and the macro refills it within seconds of coming
@@ -4248,7 +4248,9 @@
             // to the level), the game auto-opened the one- or two-room popup over the level scene; the old
             // actionWaitForScreen only watched levelPixels, re-clicked the screen edge three times against
             // the open popup, and reloaded on wrong_screen.
-            function openGate(levelPixels, gateClick, levelName, waitTitle, fastClick = null) {
+            // Optional altExit ({pixels, jumpTitle}) lets first-floor lvl234/lvl789 recovery hand off to
+            // lvl(5)/lvl(0) even when the end-of-floor scene appears after EXTRA_WALK_DELAY_FIRST_FLOOR.
+            function openGate(levelPixels, gateClick, levelName, waitTitle, fastClick = null, altExit = null) {
                 return {actionType: actionCustom, title: waitTitle, run: async () => {
                     lvlTitle = levelName
                     let retries = MAX_RETRIES
@@ -4266,6 +4268,10 @@
                             if (isRunningMacro != MACRO_DUNGEON) return null
                             deadline = Date.now() + DELAY_CHECK_CYCLE
                             continue
+                        }
+                        if (altExit && await screenMatches(altExit.pixels, 15)) {
+                            skipUntilAction = altExit.jumpTitle
+                            return null
                         }
                         if (await screenMatches(popupTwoRoomsSelection, 20) || await screenMatches(popupOneRoomSelection, 20)) {
                             return null
@@ -4601,22 +4607,25 @@
             const jumpIfLvl5 = {pixels: screenLvl5, actionType: actionJumpIfScreen, jumpTitle: lvl(5)}
             const jumpIfLvl0 = {pixels: screenLvl0, actionType: actionJumpIfScreen, jumpTitle: lvl(0)}
 
+            const exitToLvl5 = {pixels: screenLvl5, jumpTitle: lvl(5)}
+            const exitToLvl0 = {pixels: screenLvl0, jumpTitle: lvl(0)}
+
             if (skipUntilAction == lvl234) {
                 await runActions([
-                    title(lvl234), openGate(screenLvl234, gateMid, lvl234, "Waiting for lvl2/3/4", fastRightClick), chooseRoom(gateMid, lvl234), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl234), openGate(screenLvl234, gateMid, lvl234, "Waiting for lvl2/3/4", fastRightClick, exitToLvl5), chooseRoom(gateMid, lvl234), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     jumpIfLvl234, jumpIfLvl5,
-                    title(lvl234), openGate(screenLvl234, gateMid, lvl234, "Waiting for lvl2/3/4", fastRightClick), chooseRoom(gateMid, lvl234), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl234), openGate(screenLvl234, gateMid, lvl234, "Waiting for lvl2/3/4", fastRightClick, exitToLvl5), chooseRoom(gateMid, lvl234), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     jumpIfLvl234, jumpIfLvl5,
-                    title(lvl234), openGate(screenLvl234, gateMid, lvl234, "Waiting for lvl2/3/4", fastRightClick), chooseRoom(gateMid, lvl234), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl234), openGate(screenLvl234, gateMid, lvl234, "Waiting for lvl2/3/4", fastRightClick, exitToLvl5), chooseRoom(gateMid, lvl234), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     {actionType: actionJump, jumpTitle: lvl(5)}
                 ], MACRO_DUNGEON)
             } else if (skipUntilAction == lvl789) {
                 await runActions([
-                    title(lvl789), openGate(screenLvl789, gateMid, lvl789, "Waiting for mid gate scene", fastLeftClick), chooseRoom(gateMid, lvl789), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl789), openGate(screenLvl789, gateMid, lvl789, "Waiting for mid gate scene", fastLeftClick, exitToLvl0), chooseRoom(gateMid, lvl789), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     jumpIfLvl789, jumpIfLvl0,
-                    title(lvl789), openGate(screenLvl789, gateMid, lvl789, "Waiting for mid gate scene", fastLeftClick), chooseRoom(gateMid, lvl789), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl789), openGate(screenLvl789, gateMid, lvl789, "Waiting for mid gate scene", fastLeftClick, exitToLvl0), chooseRoom(gateMid, lvl789), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     jumpIfLvl789, jumpIfLvl0,
-                    title(lvl789), openGate(screenLvl789, gateMid, lvl789, "Waiting for mid gate scene", fastLeftClick), chooseRoom(gateMid, lvl789), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
+                    title(lvl789), openGate(screenLvl789, gateMid, lvl789, "Waiting for mid gate scene", fastLeftClick, exitToLvl0), chooseRoom(gateMid, lvl789), ...battleActions, delay(EXTRA_WALK_DELAY_FIRST_FLOOR),
                     {actionType: actionJump, jumpTitle: lvl(0)}
                 ], MACRO_DUNGEON)
             }
